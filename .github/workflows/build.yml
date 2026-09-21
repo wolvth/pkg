@@ -200,18 +200,6 @@ jobs:
           done
           make defconfig
 
-          echo "=== qnatter 相关全部配置 ==="
-          grep -i qnatter .config
-            
-          echo "=== package/feeds 下的 qnatter ==="
-          find package/feeds -path "*qnatter*" -maxdepth 5 2>/dev/null
-            
-          echo "=== feeds 里的 qnatter 翻译 ==="
-          find feeds -path "*qnatter*" -name "*.po" 2>/dev/null
-            
-          echo "=== luci.mk 是否可达 ==="
-          ls -la package/feeds/luci/luci.mk feeds/luci/luci.mk 2>/dev/null
-
           echo "--- 最终选中的包 ---"
           for pkg in $PKGS; do
             grep -E "^CONFIG_PACKAGE_${pkg}=[my]" .config || echo "  (未选中) ${pkg}"
