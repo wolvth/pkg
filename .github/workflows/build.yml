@@ -137,23 +137,18 @@ jobs:
           echo "克隆 OpenWrt ${VERSION}..."
           git clone --depth 1 --branch "$VERSION" \
             https://git.openwrt.org/openwrt/openwrt.git openwrt
-
-      - name: 恢复编译缓存
-        if: inputs.use_cache != false
-        uses: actions/cache@v6
-        with:
-          path: |
-            openwrt/staging_dir/host*
-            openwrt/staging_dir/toolchain*
-            openwrt/build_dir/host*
-            openwrt/build_dir/toolchain*
-            openwrt/dl
-            ~/.ccache
-          # key 不再绑定 plugins.conf，只绑定版本和架构，确保只要是同版本、同架构就能复用工具链
-          key: openwrt-cache-${{ inputs.openwrt_version }}-${{ needs.parse-config.outputs.target_config_hash }}
-          restore-keys: |
-            openwrt-cache-${{ inputs.openwrt_version }}-
             
+      - name: 恢复 OpenWrt 专用编译缓存
+        if: inputs.use_cache != false
+        uses: HiGarfield/cachewrtbuild@main
+        with:
+          ccache: 'true'
+          # 注意：这里的 prefix 是你的 openwrt 源码根目录名称
+          prefix: 'openwrt' 
+          # 缓存标识：建议只绑定 OpenWrt 版本和目标架构，不要绑定整个 plugins.conf！
+          # 因为如果你只是新增一个插件，工具链是完全可以复用的，绑定 plugins.conf 会导致缓存失效重编工具链
+          mixkey: ${{ inputs.openwrt_version }}-${{ needs.parse-config.outputs.target_config_hash }}
+
       - name: 配置 feeds 和目标设备
         working-directory: openwrt
         run: |
@@ -184,10 +179,7 @@ jobs:
           fi
           echo "--- feeds.conf ---"
           cat feeds.conf
-          
-          # 启用 ccache 加速 C/C++ 编译
-          echo "CONFIG_CCACHE=y" >> .config
-          
+               
       - name: 更新并安装 feeds
         working-directory: openwrt
         run: |
@@ -198,7 +190,10 @@ jobs:
         working-directory: openwrt
         run: |
           PKGS="${{ needs.parse-config.outputs.packages }}"
-
+          
+          # 启用 ccache 加速 C/C++ 编译
+          echo "CONFIG_CCACHE=y" >> .config
+          
           # 开启中文语言支持
           echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
           
@@ -230,18 +225,8 @@ jobs:
         run: |
           # 预编译内核配置，生成 build_dir/.../linux-*/.config
           #make prepare -j$(nproc)
-          #make target/linux/compile          
-          
-          echo "仅编译插件，正在精准准备工具链和内核环境..."
-          # 1. 编译最基础的工具（通常很快）
-          make tools/install -j$(nproc)
-            
-          # 2. 编译交叉编译工具链（如果有缓存会很快秒过）
-          make toolchain/install -j$(nproc)
-            
-          # 3. 核心！仅解压内核、打补丁并生成 kernel .config，不编译完整的 vmlinux
-          make target/linux/prepare -j$(nproc)
-            
+          make target/linux/compile          
+      
       - name: 编译插件
         working-directory: openwrt
         run: |
