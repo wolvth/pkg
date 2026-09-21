@@ -225,8 +225,11 @@ jobs:
         run: |
           # 预编译内核配置，生成 build_dir/.../linux-*/.config
           #make prepare -j$(nproc)
-          make target/linux/compile          
-      
+
+          make tools/install -j$(nproc)
+          make toolchain/install -j$(nproc)
+          make target/linux/compile -j$(nproc)
+          
       - name: 编译插件
         working-directory: openwrt
         run: |
