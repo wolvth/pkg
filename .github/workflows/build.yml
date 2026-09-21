@@ -120,7 +120,7 @@ jobs:
     needs: parse-config
     if: needs.parse-config.outputs.has_packages == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: 安装编译依赖
         run: |
@@ -140,7 +140,7 @@ jobs:
 
       - name: 恢复编译缓存
         if: inputs.use_cache != false
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             openwrt/staging_dir
@@ -257,7 +257,7 @@ jobs:
         if: always()
         run: |
           mkdir -p output
-          find openwrt/bin -name "*.ipk" -exec cp {} output/ \; 2>/dev/null || true
+          find openwrt/bin -name "*.apk" -exec cp {} output/ \; 2>/dev/null || true
           find openwrt/bin/targets -name "*.img.gz" -exec cp {} output/ \; 2>/dev/null || true
           find openwrt/bin/targets -name "*.bin" -exec cp {} output/ \; 2>/dev/null || true
           find openwrt/bin/targets -name "*.manifest" -exec cp {} output/ \; 2>/dev/null || true
@@ -274,7 +274,7 @@ jobs:
           fi
 
       - name: 上传插件
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openwrt-packages-${{ github.run_number }}
           path: output/*.apk
@@ -283,7 +283,7 @@ jobs:
 
       - name: 上传固件
         if: inputs.build_firmware == true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openwrt-firmware-${{ github.run_number }}
           path: |
