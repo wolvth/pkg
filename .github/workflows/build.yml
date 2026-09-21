@@ -147,7 +147,7 @@ jobs:
           prefix: 'openwrt' 
           # 缓存标识：建议只绑定 OpenWrt 版本和目标架构，不要绑定整个 plugins.conf！
           # 因为如果你只是新增一个插件，工具链是完全可以复用的，绑定 plugins.conf 会导致缓存失效重编工具链
-          mixkey: ${{ inputs.openwrt_version }}-${{ needs.parse-config.outputs.target_config_hash }}
+          mixkey: ${{ inputs.openwrt_version }}-${{ hashFiles('plugins.conf') }}
 
       - name: 配置 feeds 和目标设备
         working-directory: openwrt
