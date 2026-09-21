@@ -234,7 +234,7 @@ jobs:
           echo "=============================="
           echo "构建 toolchain (toolchain/install)..."
           echo "=============================="
-          #make toolchain/install -j$(nproc)
+          make toolchain/install -j$(nproc)
           
       - name: 编译插件
         working-directory: openwrt
