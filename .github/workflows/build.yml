@@ -187,15 +187,6 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 准备内核配置
-        working-directory: openwrt
-        run: |
-          # 生成完整配置（包含内核）
-          make defconfig
-          # 预编译内核配置，生成 build_dir/.../linux-*/.config
-          make prepare -j$(nproc)
-          #make target/linux/compile -j$(nproc)
-               
       - name: 选择编译包
         working-directory: openwrt
         run: |
@@ -224,6 +215,15 @@ jobs:
         run: |
           make download -j$(nproc)
 
+      - name: 准备内核配置
+        working-directory: openwrt
+        run: |
+          # 生成完整配置（包含内核）
+          make defconfig
+          # 预编译内核配置，生成 build_dir/.../linux-*/.config
+          make prepare -j$(nproc)
+          #make target/linux/compile -j$(nproc)
+          
       - name: 编译插件
         working-directory: openwrt
         run: |
