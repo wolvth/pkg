@@ -19,7 +19,7 @@ on:
         default: ''
         type: string
       build_firmware:
-        description: '是否编译完整固件（否=只编译插件ipk）'
+        description: '是否编译完整固件（否=只编译插件apk）'
         required: false
         default: false
         type: boolean
@@ -187,21 +187,36 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: 准备内核配置
+        working-directory: openwrt
+        run: |
+          # 生成完整配置（包含内核）
+          make defconfig
+          # 预编译内核配置，生成 build_dir/.../linux-*/.config
+          make prepare -j$(nproc)
+          #make target/linux/compile -j$(nproc)
+               
       - name: 选择编译包
         working-directory: openwrt
         run: |
-          for pkg in ${{ needs.parse-config.outputs.packages }}; do
+          PKGS="${{ needs.parse-config.outputs.packages }}"
+
+          for pkg in $PKGS; do
             echo "CONFIG_PACKAGE_${pkg}=m" >> .config
           done
           make defconfig
 
           echo "--- 最终选中的包 ---"
-          grep "CONFIG_PACKAGE.*=m" .config | grep -v "${pkg}" | head -50 || true
-          echo "..."
+          for pkg in $PKGS; do
+            grep -E "^CONFIG_PACKAGE_${pkg}=[my]" .config || echo "  (未选中) ${pkg}"
+          done
+
           echo ""
           echo "### 📦 编译目标" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep "CONFIG_PACKAGE.*=m" .config | grep -v "${pkg}" >> "$GITHUB_STEP_SUMMARY" || true
+          for pkg in $PKGS; do
+            grep -E "^CONFIG_PACKAGE_${pkg}=[my]" .config >> "$GITHUB_STEP_SUMMARY" || echo "  (未选中) ${pkg}" >> "$GITHUB_STEP_SUMMARY"
+          done
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: 下载源码包
@@ -213,30 +228,45 @@ jobs:
         working-directory: openwrt
         run: |
           FAILED=""
+          PKGS="${{ needs.parse-config.outputs.packages }}"
+
           if [ "${{ inputs.build_firmware }}" == "true" ]; then
             echo "=============================="
             echo "编译完整固件..."
             echo "=============================="
+            # 第一次并行、不加 V=s；失败再串行详细输出
             make -j$(nproc) || make -j1 V=s
           else
-            for pkg in ${{ needs.parse-config.outputs.packages }}; do
+            for pkg in $PKGS; do
               echo "=============================="
               echo "编译: ${pkg}"
               echo "=============================="
-              make "package/${pkg}/compile" V=s -j$(nproc) 2>&1 || {
-                echo "::warning::${pkg} 并行编译失败，单线程重试..."
-                make "package/${pkg}/compile" V=s -j1 2>&1 || {
+
+              # 第一次：并行、不显示详细命令，求快、日志短
+              if ! make "package/${pkg}/compile" -j$(nproc); then
+                echo "::warning::${pkg} 并行编译失败，清理后单线程详细重试..."
+
+                # 清理该包编译产物，避免残留 stamp 让 make 误判“已完成”而跳步
+                make "package/${pkg}/clean" V=s || true
+
+                # 第二次：串行、V=s，日志完整，便于定位错误
+                if ! make "package/${pkg}/compile" V=s -j1; then
                   echo "::error::${pkg} 编译失败"
                   FAILED="${FAILED} ${pkg}"
-                }
-              }
+                fi
+              fi
+
+              # 明确分隔，避免误以为“跳到了下一个包”
+              echo "----------------------------------------"
             done
           fi
 
           if [ -n "$FAILED" ]; then
             echo ""
             echo "### ❌ 以下包编译失败:" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
             echo "$FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::以下包编译失败:${FAILED}"
           fi
 
