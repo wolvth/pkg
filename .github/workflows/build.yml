@@ -192,6 +192,9 @@ jobs:
         run: |
           PKGS="${{ needs.parse-config.outputs.packages }}"
 
+          # 开启中文语言支持
+          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+          
           for pkg in $PKGS; do
             echo "CONFIG_PACKAGE_${pkg}=m" >> .config
           done
