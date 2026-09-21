@@ -223,8 +223,18 @@ jobs:
         run: |
           # 预编译内核配置，生成 build_dir/.../linux-*/.config
           #make prepare -j$(nproc)
-          make target/linux/prepare -j$(nproc)
-          #make target/linux/compile -j$(nproc)
+          #make target/linux/prepare -j$(nproc)
+          #make target/linux/compile          
+          
+          echo "=============================="
+          echo "构建 host 工具 (tools/install)..."
+          echo "=============================="
+          make tools/install -j$(nproc)
+
+          echo "=============================="
+          echo "构建 toolchain (toolchain/install)..."
+          echo "=============================="
+          #make toolchain/install -j$(nproc)
           
       - name: 编译插件
         working-directory: openwrt
@@ -247,9 +257,6 @@ jobs:
               # 第一次：并行、不显示详细命令，求快、日志短
               if ! make "package/${pkg}/compile" -j$(nproc); then
                 echo "::warning::${pkg} 并行编译失败，清理后单线程详细重试..."
-
-                # 清理该包编译产物，避免残留 stamp 让 make 误判“已完成”而跳步
-                make "package/${pkg}/clean" V=s || true
 
                 # 第二次：串行、V=s，日志完整，便于定位错误
                 if ! make "package/${pkg}/compile" V=s -j1; then
