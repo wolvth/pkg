@@ -41,7 +41,7 @@ jobs:
       target_config: ${{ steps.parse.outputs.target_config }}
       has_packages: ${{ steps.parse.outputs.has_packages }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Parse plugins.conf
         id: parse
@@ -191,12 +191,12 @@ jobs:
         working-directory: openwrt
         run: |
           for pkg in ${{ needs.parse-config.outputs.packages }}; do
-            echo "CONFIG_PACKAGE_${pkg}=y" >> .config
+            echo "CONFIG_PACKAGE_${pkg}=m" >> .config
           done
           make defconfig
 
           echo "--- 最终选中的包 ---"
-          grep "CONFIG_PACKAGE.*=y" .config | grep -v "CONFIG_PACKAGE_lib" | head -30 || true
+          grep "CONFIG_PACKAGE.*=m" .config | grep -v "CONFIG_PACKAGE_lib" | head -30 || true
           echo "..."
           echo ""
           echo "### 📦 编译目标" >> "$GITHUB_STEP_SUMMARY"
