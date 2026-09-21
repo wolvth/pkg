@@ -196,12 +196,12 @@ jobs:
           make defconfig
 
           echo "--- 最终选中的包 ---"
-          grep "CONFIG_PACKAGE.*=m" .config | grep -v "CONFIG_PACKAGE_lib" | head -30 || true
+          grep "CONFIG_PACKAGE.*=m" .config | grep -v "${pkg}" | head -50 || true
           echo "..."
           echo ""
           echo "### 📦 编译目标" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep "CONFIG_PACKAGE.*=m" .config | grep -v "CONFIG_PACKAGE_lib" >> "$GITHUB_STEP_SUMMARY" || true
+          grep "CONFIG_PACKAGE.*=m" .config | grep -v "${pkg}" >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: 下载源码包
