@@ -1,6 +1,6 @@
 # 通用 OpenWrt LuCI 单/多插件编译器
 # 支持单/多包自动探测、多级子目录、自动编译 i18n 翻译包
-name: Build OpenWrt Plugin
+name: Build test
 
 on:
   workflow_dispatch:
@@ -214,6 +214,18 @@ jobs:
     - name: 逐包编译
       working-directory: sdk
       run: |
+        # 编译前：列出本次将编译的包与源码目录
+        echo "=========================================="
+        echo "📋 本次将编译的包:"
+        for pkg in $BUILD_PACKAGES; do
+          echo "   📦 $pkg"
+        done
+        echo "📁 对应源码目录:"
+        for dir in $BUILD_DIRS; do
+          echo "   📂 package/${dir}"
+        done
+        echo "=========================================="
+
         # 按目录编译各个包（优先依赖编译）
         for dir in $BUILD_DIRS; do
           echo "🔨 正在编译源码目录: package/${dir} ..."
