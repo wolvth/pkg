@@ -1,0 +1,448 @@
+# 通用 OpenWrt LuCI 插件全自动高效编译器 (终极版)
+# 支持全目录拓扑、同级依赖引用、单Makefile多包识别、容错跳过与可视化报告
+name: ai_studio_code Build OpenWrt Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: '插件源码仓库地址 (HTTPS)'
+        required: true
+        default: 'https://github.com/qimaoww/QNatter.git'
+      repo_branch:
+        description: '仓库分支'
+        required: false
+        default: 'main'
+      plugin_subdir:
+        description: '指定扫描子目录（留空=扫描整个仓库）'
+        required: false
+        default: ''
+      package_name:
+        description: '手动强制指定包名（支持多个，空格/逗号分隔；留空=全自动检测）'
+        required: false
+        default: ''
+      exclude_pkg:
+        description: '排除的包名/目录名（多个用逗号分隔，如: duck,kmod-ebpf）'
+        required: false
+        default: ''
+      openwrt_version:
+        description: 'OpenWrt SDK 版本'
+        required: false
+        default: '25.12.5'
+      target_arch:
+        description: '目标架构（格式: target subtarget）'
+        required: false
+        default: 'rockchip armv8'
+      timeout_per_pkg:
+        description: '单插件编译超时（分钟，0 或留空=不限制）'
+        required: false
+        default: '0'
+
+jobs:
+  build:
+    name: Build Packages
+    runs-on: ubuntu-24.04
+
+    steps:
+    # ── 1. 解析并清晰打印参数 ─────────────────────────────────
+    - name: 解析与确认参数
+      id: params
+      run: |
+        ARCH="${{ inputs.target_arch }}"
+        TARGET=$(echo "$ARCH" | awk '{print $1}')
+        SUBTARGET=$(echo "$ARCH" | awk '{print $2}')
+        REPO_NAME=$(basename -s .git "${{ inputs.repo_url }}")
+        TIMEOUT="${{ inputs.timeout_per_pkg }}"
+        TIMEOUT="${TIMEOUT:-0}"
+
+        echo "VERSION=${{ inputs.openwrt_version }}" >> $GITHUB_ENV
+        echo "TARGET=$TARGET"                       >> $GITHUB_ENV
+        echo "SUBTARGET=$SUBTARGET"                 >> $GITHUB_ENV
+        echo "REPO_NAME=$REPO_NAME"                 >> $GITHUB_ENV
+        echo "PLUGIN_SUBDIR=${{ inputs.plugin_subdir }}" >> $GITHUB_ENV
+        echo "PACKAGE_NAME=${{ inputs.package_name }}"   >> $GITHUB_ENV
+        echo "EXCLUDE_PKG=${{ inputs.exclude_pkg }}"     >> $GITHUB_ENV
+        echo "TIMEOUT_MIN=$TIMEOUT"                 >> $GITHUB_ENV
+
+        echo "=========================================="
+        echo "📋 编译任务参数已就绪:"
+        echo "   仓库地址:   ${{ inputs.repo_url }}"
+        echo "   代码分支:   ${{ inputs.repo_branch }}"
+        echo "   扫描子目录: ${PLUGIN_SUBDIR:-<全仓库扫描>}"
+        echo "   指定包名:   ${PACKAGE_NAME:-<全自动识别>}"
+        echo "   排除列表:   ${EXCLUDE_PKG:-<无>}"
+        echo "   SDK 版本:   ${{ inputs.openwrt_version }}"
+        echo "   目标架构:   $TARGET / $SUBTARGET"
+        echo "   单包超时:   ${TIMEOUT} 分钟/包"
+        echo "=========================================="
+
+    # ── 2. 安装基础编译依赖与语言环境 ─────────────────────────
+    - name: 安装基础编译依赖
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -yqq \
+          build-essential libncurses-dev zlib1g-dev gawk git \
+          gettext libssl-dev xsltproc rsync wget unzip file \
+          python3 python3-pyelftools zstd dos2unix
+        echo "✅ 系统基础依赖安装完成"
+
+    - name: 配置 Go 编译环境 (用于编译 Go 二进制内核)
+      uses: actions/setup-go@v5
+      with:
+        go-version: 'stable'
+
+    # ── 3. SDK 缓存 ───────────────────────────────────────────
+    - name: 检查 SDK 缓存
+      id: cache-sdk
+      uses: actions/cache@v6
+      with:
+        path: sdk.tar.zst
+        key: openwrt-sdk-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
+
+    # ── 4. 动态下载 SDK ───────────────────────────────────────
+    - name: 下载 SDK
+      if: steps.cache-sdk.outputs.cache-hit != 'true'
+      run: |
+        BASE="https://downloads.openwrt.org/releases/${VERSION}/targets/${TARGET}/${SUBTARGET}"
+        echo "🔍 查询版本校验表: ${BASE}/sha256sums"
+
+        SHALIST=$(wget -qO- "${BASE}/sha256sums" || true)
+        if [ -z "$SHALIST" ]; then
+          echo "❌ 无法访问该架构目录，请确认版本与架构拼写是否正确。"
+          exit 1
+        fi
+
+        SDK_FILE=$(echo "$SHALIST" | grep -oE "openwrt-sdk-[^ ]+\.Linux-x86_64\.(tar\.zst|tar\.xz)" | head -n1)
+        if [ -z "$SDK_FILE" ]; then
+          echo "❌ 未在官方镜像源中匹配到对应的 SDK 压缩包"
+          exit 1
+        fi
+
+        echo "📦 开始下载 SDK: ${BASE}/${SDK_FILE}"
+        wget -q --show-progress "${BASE}/${SDK_FILE}" -O sdk.tar.zst
+        echo "✅ SDK 下载完成: $(du -h sdk.tar.zst | cut -f1)"
+
+    # ── 5. 解压 SDK ───────────────────────────────────────────
+    - name: 解压 SDK
+      run: |
+        rm -rf sdk
+        mkdir -p sdk
+        tar -axf sdk.tar.zst -C sdk --strip-components=1
+        echo "✅ SDK 解压就绪"
+
+    # ── 6. 初始化 Feeds (在导入自定义代码前先行建立原生索引) ──
+    - name: 初始化官方 Feeds
+      working-directory: sdk
+      run: |
+        echo "🔄 更新 Feeds..."
+        ./scripts/feeds update -a >/dev/null 2>&1
+        echo "📥 安装 Feeds..."
+        ./scripts/feeds install -a >/dev/null 2>&1
+        echo "✅ 官方 Feeds 初始化完成"
+
+    # ── 7. 克隆源码仓库 ───────────────────────────────────────
+    - name: 克隆源码仓库
+      run: |
+        REPO_DIR="/tmp/plugin-repo"
+        rm -rf "$REPO_DIR"
+        git clone --depth 1 --branch "${{ inputs.repo_branch }}" "${{ inputs.repo_url }}" "$REPO_DIR"
+        echo "✅ 仓库克隆完成，顶级目录结构:"
+        find "$REPO_DIR" -maxdepth 2 -not -path '*/.*' | sort
+
+    # ── 8. 智能平铺部署至 SDK (拓扑保护) ───────────────────────
+    - name: 部署源码并修复拓扑
+      working-directory: sdk
+      run: |
+        REPO_DIR="/tmp/plugin-repo"
+        mkdir -p package/custom
+
+        # 智能区分：单插件根目录 vs 复杂/多目录 Monorepo
+        if [ -f "$REPO_DIR/Makefile" ]; then
+          echo "📁 检测到仓库根目录即为插件，部署至 package/custom/${REPO_NAME}"
+          mkdir -p "package/custom/${REPO_NAME}"
+          rsync -a --exclude='.git' "$REPO_DIR/" "package/custom/${REPO_NAME}/"
+        else
+          echo "📁 检测到多目录结构仓库，平铺镜像部署至 package/custom/"
+          rsync -a --exclude='.git' "$REPO_DIR/" package/custom/
+        fi
+
+        # 修复 www/ 目录为 OpenWrt 标准 htdocs/
+        find package/custom -type d -name "www" 2>/dev/null | while read -r w; do
+          pdir=$(dirname "$w")
+          mkdir -p "$pdir/htdocs"
+          cp -rT "$w" "$pdir/htdocs"
+          rm -rf "$w"
+          echo "  🔧 已转换: $w -> $pdir/htdocs"
+        done
+
+        # 泛化修复任意层级的 ../luci.mk
+        find package/custom -name "Makefile" -exec sed -i -E 's#(\.\./)+luci\.mk#$(TOPDIR)/feeds/luci/luci.mk#g' {} + 2>/dev/null || true
+
+        # 剔除强依赖 (防止编译 LuCI app 时 SDK 去递归编译庞大的核心库与工具链)
+        find package/custom -name "Makefile" -exec sed -i '/^[[:space:]]*LUCI_DEPENDS[[:space:]]*:=/d' {} + 2>/dev/null || true
+        echo "✅ 源码结构兼容修复完成"
+
+    # ── 9. 扫描与探测待编译包和目录 ───────────────────────────
+    - name: 扫描并识别待编译目标
+      id: scan
+      working-directory: sdk
+      run: |
+        SCAN_ROOT="package/custom"
+        if [ -n "$PLUGIN_SUBDIR" ]; then
+          if [ -d "package/custom/$REPO_NAME/$PLUGIN_SUBDIR" ]; then
+            SCAN_ROOT="package/custom/$REPO_NAME/$PLUGIN_SUBDIR"
+          elif [ -d "package/custom/$PLUGIN_SUBDIR" ]; then
+            SCAN_ROOT="package/custom/$PLUGIN_SUBDIR"
+          else
+            echo "❌ 未找到指定的子目录: $PLUGIN_SUBDIR"
+            exit 1
+          fi
+        fi
+
+        echo "🔍 扫描路径: $SCAN_ROOT"
+
+        # 处理排除逻辑
+        EXCLUDE_ARRAY=()
+        if [ -n "$EXCLUDE_PKG" ]; then
+          IFS=',' read -ra EXCLUDE_ARRAY <<< "$EXCLUDE_PKG"
+        fi
+
+        is_excluded() {
+          local name="$1"
+          for ex in "${EXCLUDE_ARRAY[@]}"; do
+            [ "$name" = "$ex" ] && return 0
+          done
+          return 1
+        }
+
+        declare -a DETECTED_PKGS=()
+        declare -a DETECTED_DIRS=()
+
+        while IFS= read -r mk; do
+          # 仅识别规范的 OpenWrt Makefile（跳过内部构建源码脚本如 src/Makefile）
+          grep -qE '^[[:space:]]*include[[:space:]]+.*(rules\.mk|luci\.mk)|^[[:space:]]*define[[:space:]]+Package/' "$mk" || continue
+
+          DIR_PATH=$(dirname "$mk")
+          REL_DIR="${DIR_PATH#package/}"
+          DIR_NAME=$(basename "$DIR_PATH")
+
+          if is_excluded "$DIR_NAME"; then
+            echo "  ⏭️ 排除目录: $DIR_PATH"
+            continue
+          fi
+
+          # 提取当前 Makefile 下定义的所有包（兼容单个 Makefile 多包）
+          PKGS_IN_MK=$(grep -oE '^[[:space:]]*define[[:space:]]+Package/[a-zA-Z0-9_-]+' "$mk" | awk -F'/' '{print $2}' || true)
+
+          HAS_ACTIVE_PKG=0
+          for p in $PKGS_IN_MK; do
+            if [ -n "$p" ] && ! is_excluded "$p"; then
+              DETECTED_PKGS+=("$p")
+              HAS_ACTIVE_PKG=1
+            fi
+          done
+
+          # 兜底：若没有标准 define Package/，尝试提取 PKG_NAME 或直接使用目录名
+          if [ $HAS_ACTIVE_PKG -eq 0 ]; then
+            FALLBACK_PKG=$(grep -m1 -E '^[[:space:]]*PKG_NAME[[:space:]]*[:?+]?=' "$mk" | sed -E 's/.*=[[:space:]]*//' | tr -d '\r ' || true)
+            [ -z "$FALLBACK_PKG" ] || [[ "$FALLBACK_PKG" == *'$('* ]] && FALLBACK_PKG="$DIR_NAME"
+
+            if ! is_excluded "$FALLBACK_PKG"; then
+              DETECTED_PKGS+=("$FALLBACK_PKG")
+              HAS_ACTIVE_PKG=1
+            fi
+          fi
+
+          if [ $HAS_ACTIVE_PKG -eq 1 ]; then
+            DETECTED_DIRS+=("$REL_DIR")
+          fi
+        done < <(find "$SCAN_ROOT" -maxdepth 4 -name 'Makefile' -not -path '*/.git/*')
+
+        # 如果手动指定了包名，优先激活指定包名
+        if [ -n "$PACKAGE_NAME" ]; then
+          echo "⚠️ 用户已手动指定包名，强制配置指定包"
+          DETECTED_PKGS=($(echo "$PACKAGE_NAME" | tr ',' ' '))
+        fi
+
+        FINAL_PKGS=($(echo "${DETECTED_PKGS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+        FINAL_DIRS=($(echo "${DETECTED_DIRS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+
+        if [ ${#FINAL_DIRS[@]} -eq 0 ]; then
+          echo "❌ 未检测到任何可编译的 OpenWrt 插件目录"
+          exit 1
+        fi
+
+        # 清理官方 feeds 中的冲突包，确保优先使用本次编译的源码
+        for pkg in "${FINAL_PKGS[@]}"; do
+          rm -rf "package/feeds/luci/${pkg}" \
+                 "feeds/luci/applications/${pkg}" \
+                 "package/feeds/packages/${pkg}" 2>/dev/null || true
+        done
+
+        echo "=========================================="
+        echo "📦 待激活的软件包清单 (${#FINAL_PKGS[@]} 个):"
+        printf ' - %s\n' "${FINAL_PKGS[@]}"
+        echo "📁 待编译的源码目录 (${#FINAL_DIRS[@]} 个):"
+        printf ' - package/%s\n' "${FINAL_DIRS[@]}"
+        echo "=========================================="
+
+        printf '%s\n' "${FINAL_PKGS[@]}" > /tmp/target_packages.txt
+        printf '%s\n' "${FINAL_DIRS[@]}" > /tmp/target_dirs.txt
+        echo "PACKAGE_COUNT=${#FINAL_PKGS[@]}" >> $GITHUB_ENV
+
+    # ── 10. 配置编译选项 ──────────────────────────────────────
+    - name: 配置编译选项 (.config)
+      working-directory: sdk
+      run: |
+        # 激活所有被探测到的有效包
+        while read -r PKG; do
+          [ -z "$PKG" ] && continue
+          echo "CONFIG_PACKAGE_${PKG}=y" >> .config
+        done < /tmp/target_packages.txt
+
+        make defconfig 2>&1 | tail -n 10
+        echo "✅ .config 配置文件生成完成"
+
+    # ── 11. 执行编译 (按目录编译，避免重复且直达底层) ──────────
+    - name: 逐目录执行编译
+      id: compile
+      working-directory: sdk
+      run: |
+        SUCCESS=()
+        FAILED=()
+        TIMEOUT_LIST=()
+        TIMEOUT_MIN="${{ env.TIMEOUT_MIN }}"
+        TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
+
+        while read -r DIR; do
+          [ -z "$DIR" ] && continue
+          echo ""
+          echo "════════════════════════════════════════════════"
+          echo "🔨 正在编译目录: package/${DIR} (超时限制: ${TIMEOUT_MIN} 分钟)"
+          echo "════════════════════════════════════════════════"
+
+          START_TIME=$(date +%s)
+          
+          if [ "$TIMEOUT_SEC" -gt 0 ]; then
+            COMPILE_CMD="timeout ${TIMEOUT_SEC} make package/${DIR}/compile V=s -j$(nproc)"
+          else
+            COMPILE_CMD="make package/${DIR}/compile V=s -j$(nproc)"
+          fi
+
+          if eval "$COMPILE_CMD" 2>&1 | tail -n 60; then
+            ELAPSED=$(( $(date +%s) - START_TIME ))
+            echo "  ✅ [package/${DIR}] 编译成功 (耗时: ${ELAPSED}s)"
+            SUCCESS+=("$DIR")
+          else
+            EXIT_CODE=$?
+            ELAPSED=$(( $(date +%s) - START_TIME ))
+            if [ "$TIMEOUT_SEC" -gt 0 ] && [ "$EXIT_CODE" -eq 124 ]; then
+              echo "  ⏰ [package/${DIR}] 编译超时已中止 (${ELAPSED}s >= ${TIMEOUT_MIN}m)，自动跳过"
+              TIMEOUT_LIST+=("$DIR")
+              pkill -f "make.*${DIR}" 2>/dev/null || true
+            else
+              echo "  ❌ [package/${DIR}] 编译失败 (耗时: ${ELAPSED}s)，跳过继续"
+              FAILED+=("$DIR")
+            fi
+          fi
+        done < /tmp/target_dirs.txt
+
+        echo ""
+        echo "=========================================="
+        echo "📊 编译阶段完成统计:"
+        echo "  ✅ 成功目录数: ${#SUCCESS[@]} -> ${SUCCESS[*]:-无}"
+        echo "  ❌ 失败目录数: ${#FAILED[@]} -> ${FAILED[*]:-无}"
+        echo "  ⏰ 超时目录数: ${#TIMEOUT_LIST[@]} -> ${TIMEOUT_LIST[*]:-无}"
+        echo "=========================================="
+
+        echo "success_count=${#SUCCESS[@]}" >> $GITHUB_OUTPUT
+        echo "failed_count=${#FAILED[@]}"   >> $GITHUB_OUTPUT
+        echo "timeout_count=${#TIMEOUT_LIST[@]}" >> $GITHUB_OUTPUT
+        FL="${FAILED[*]} ${TIMEOUT_LIST[*]}"
+        echo "failed_list=${FL# }" >> $GITHUB_OUTPUT
+
+        # 若全部目录均失败则熔断
+        if [ ${#SUCCESS[@]} -eq 0 ] && [ $(( ${#FAILED[@]} + ${#TIMEOUT_LIST[@]} )) -gt 0 ]; then
+          echo "❌ 所有目录均编译失败，终止流水线！"
+          exit 1
+        fi
+
+    # ── 12. 收集编译产物 (支持 ipk/apk 与 i18n 语言包) ────────
+    - name: 收集编译产物
+      run: |
+        mkdir -p artifacts
+
+        # 遍历 SDK 输出目录匹配产物
+        find sdk/bin/ -type f \( -name "*.ipk" -o -name "*.apk" \) 2>/dev/null | while read -r file; do
+          FNAME=$(basename "$file")
+          MATCHED=0
+
+          while read -r PKG; do
+            [ -z "$PKG" ] && continue
+            SHORT_NAME="${PKG#luci-app-}"
+            SHORT_NAME="${SHORT_NAME#luci-}"
+
+            # 匹配原包、短名、以及多国语言包
+            if [[ "$FNAME" == *"$PKG"* ]] || \
+               [[ "$FNAME" == *"$SHORT_NAME"* ]] || \
+               [[ "$FNAME" == *"luci-i18n-${SHORT_NAME}"* ]]; then
+              MATCHED=1
+              break
+            fi
+          done < /tmp/target_packages.txt
+
+          if [ $MATCHED -eq 1 ]; then
+            echo "📦 收集交付物: $FNAME"
+            cp -n "$file" artifacts/
+          fi
+        done
+
+        # 兜底：若精准匹配未抓取到文件，则全盘收集 bin 目录下的所有 ipk/apk
+        if [ ! "$(ls -A artifacts/ 2>/dev/null)" ]; then
+          echo "⚠️ 精准匹配未命中，执行兜底收集 SDK bin 目录下所有产物..."
+          find sdk/bin/ -type f \( -name "*.ipk" -o -name "*.apk" \) -exec cp -n {} artifacts/ \; 2>/dev/null || true
+        fi
+
+        echo ""
+        echo "📦 最终构建产物清单:"
+        ls -lh artifacts/
+
+    # ── 13. 上传产物至 GitHub Artifacts ───────────────────────
+    - name: 上传构建产物
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ env.REPO_NAME }}-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
+        path: artifacts/*
+        if-no-files-found: error
+        retention-days: 90
+
+    # ── 14. 渲染 Markdown 报告摘要 ────────────────────────────
+    - name: 生成编译报告摘要
+      if: always()
+      run: |
+        echo "## 📊 OpenWrt 插件编译报告" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| 配置项 | 属性值 |" >> $GITHUB_STEP_SUMMARY
+        echo "|:---|:---|" >> $GITHUB_STEP_SUMMARY
+        echo "| **源码仓库** | \`${{ inputs.repo_url }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **分支** | \`${{ inputs.repo_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **扫描目录** | \`${{ inputs.plugin_subdir || '<全仓库>' }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **SDK 版本** | \`${{ env.VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **目标架构** | \`${{ env.TARGET }} / ${{ env.SUBTARGET }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **探测包数** | **${{ env.PACKAGE_COUNT || 0 }}** 个 |" >> $GITHUB_STEP_SUMMARY
+        echo "| **单目录超时** | ${{ env.TIMEOUT_MIN }} 分钟 |" >> $GITHUB_STEP_SUMMARY
+        echo "| **编译结果** | ✅ 成功: **${{ steps.compile.outputs.success_count || 0 }}** / ❌ 失败: **${{ steps.compile.outputs.failed_count || 0 }}** / ⏰ 超时: **${{ steps.compile.outputs.timeout_count || 0 }}** |" >> $GITHUB_STEP_SUMMARY
+
+        if [ -n "${{ steps.compile.outputs.failed_list }}" ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ 未能成功编译的目录" >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.compile.outputs.failed_list }}' | tr ' ' '\n' | while read -r item; do
+            [ -n "$item" ] && echo "- \`package/$item\`" >> $GITHUB_STEP_SUMMARY
+          done
+        fi
+
+    # ── 15. 清理临时环境 ──────────────────────────────────────
+    - name: 清理工作区
+      if: always()
+      run: |
+        rm -rf sdk /tmp/plugin-repo /tmp/target_*.txt artifacts
