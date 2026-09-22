@@ -1,6 +1,6 @@
 # 通用 OpenWrt LuCI 单/多插件编译器
 # 支持单/多包自动探测、多级子目录、自动编译 i18n 翻译包
-name: Build test
+name: SDK Build Plugin
 
 on:
   workflow_dispatch:
