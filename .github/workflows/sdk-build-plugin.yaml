@@ -10,7 +10,7 @@ on:
         required: true
         default: 'https://github.com/wolvth/build.git'
       repo_branch:
-        description: '仓库分支'
+        description: '仓库分支,兼容master'
         required: false
         default: 'main'
       plugin_subdir:
@@ -50,6 +50,15 @@ jobs:
         echo "REPO_NAME=$REPO_NAME"                 >> $GITHUB_ENV
         echo "PLUGIN_SUBDIR=${{ inputs.plugin_subdir }}" >> $GITHUB_ENV
 
+        echo "=========================================="
+        echo "📋 编译任务配置已加载:"
+        echo "   仓库地址: ${{ inputs.repo_url }}"
+        echo "   分支名称: ${{ inputs.repo_branch }}"
+        echo "   扫描子目录: ${PLUGIN_SUBDIR:-<全仓库>}"
+        echo "   手动指定包: ${PACKAGE_NAME:-<自动检测>}"
+        echo "   SDK 版本: ${{ inputs.openwrt_version }}"
+        echo "   目标架构: $TARGET / $SUBTARGET"
+        echo "=========================================="
     # ── 2. 安装依赖 ──────────────────────────────────────────
     - name: 安装基础编译依赖
       run: |
@@ -103,14 +112,27 @@ jobs:
         tar -axf sdk.tar.zst -C sdk --strip-components=1
         echo "✅ SDK 解压完成"
 
-    # ── 6. 完整保留目录结构平铺放入 SDK ──────────────────────
+    # ── 6. 初始化 Feeds ──────────────────────────────────────
+    - name: 初始化 Feeds
+      working-directory: sdk
+      run: |
+        ./scripts/feeds update -a >/dev/null 2>&1
+        ./scripts/feeds install -a >/dev/null 2>&1
+        echo "✅ Feeds 初始化完成"
+        
+    # ── 7. 完整保留目录结构平铺放入 SDK ──────────────────────
     - name: 部署源码并保留原始目录拓扑
       working-directory: sdk
       run: |
         REPO_DIR="/tmp/${REPO_NAME}"
         rm -rf "$REPO_DIR"
-        git clone --depth 1 --branch "${{ inputs.repo_branch }}" "${{ inputs.repo_url }}" "$REPO_DIR"
 
+        BRANCH="${{ inputs.repo_branch }}"
+        if ! git clone --depth 1 --branch "$BRANCH" "${{ inputs.repo_url }}" "$REPO_DIR" 2>/dev/null; then
+          echo "Branch '$BRANCH' not found, trying master..."
+          git clone --depth 1 --branch master "${{ inputs.repo_url }}" "$REPO_DIR"
+        fi
+        
         SRC_ROOT="$REPO_DIR"
         if [ -n "$PLUGIN_SUBDIR" ]; then
           SRC_ROOT="$REPO_DIR/$PLUGIN_SUBDIR"
@@ -133,7 +155,8 @@ jobs:
           rm -rf "$w"
         done
         find package/custom -name "Makefile" -exec sed -i 's#\.\./\.\./luci\.mk#$(TOPDIR)/feeds/luci/luci.mk#g' {} + 2>/dev/null || true
-
+        find package/custom -name "Makefile" -exec sed -i '/^[[:space:]]*LUCI_DEPENDS[[:space:]]*:=/d' {} + 2>/dev/null || true
+        
         # 识别需要编译的包和目录
         declare -a DETECTED_PKGS=()
         declare -a DETECTED_DIRS=()
@@ -185,14 +208,6 @@ jobs:
         echo "BUILD_PACKAGES=${FINAL_PKGS[*]}" >> $GITHUB_ENV
         echo "BUILD_DIRS=${FINAL_DIRS[*]}" >> $GITHUB_ENV
         echo "REPO_DIR=$REPO_DIR" >> $GITHUB_ENV
-
-    # ── 7. 初始化 Feeds ──────────────────────────────────────
-    - name: 初始化 Feeds
-      working-directory: sdk
-      run: |
-        ./scripts/feeds update -a >/dev/null 2>&1
-        ./scripts/feeds install -a >/dev/null 2>&1
-        echo "✅ Feeds 初始化完成"
         
     # ── 8. 配置编译选项（启用 i18n 与多包） ────────────────────
     - name: 配置编译选项
