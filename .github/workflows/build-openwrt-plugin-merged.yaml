@@ -217,7 +217,7 @@ jobs:
         # 按目录编译各个包（优先依赖编译）
         for dir in $BUILD_DIRS; do
           echo "🔨 正在编译源码目录: package/${dir} ..."
-          make "package/${dir}/compile" -j$(nproc) 2>&1 | tail -80 || make "package/${dir}/compile" V=s -j1 2>&1 | tail -80
+          make "package/${dir}/compile" V=s -j$(nproc) 2>&1 | tail -80
         done
 
         echo "✅ 全部编译完成"
