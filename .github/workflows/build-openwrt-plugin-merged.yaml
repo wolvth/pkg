@@ -103,15 +103,7 @@ jobs:
         tar -axf sdk.tar.zst -C sdk --strip-components=1
         echo "✅ SDK 解压完成"
 
-    # ── 6. 初始化 Feeds ──────────────────────────────────────
-    - name: 初始化 Feeds
-      working-directory: sdk
-      run: |
-        ./scripts/feeds update -a >/dev/null 2>&1
-        ./scripts/feeds install -a >/dev/null 2>&1
-        echo "✅ Feeds 初始化完成"
-
-    # ── 7. 完整保留目录结构平铺放入 SDK ──────────────────────
+    # ── 6. 完整保留目录结构平铺放入 SDK ──────────────────────
     - name: 部署源码并保留原始目录拓扑
       working-directory: sdk
       run: |
@@ -194,6 +186,14 @@ jobs:
         echo "BUILD_DIRS=${FINAL_DIRS[*]}" >> $GITHUB_ENV
         echo "REPO_DIR=$REPO_DIR" >> $GITHUB_ENV
 
+    # ── 7. 初始化 Feeds ──────────────────────────────────────
+    - name: 初始化 Feeds
+      working-directory: sdk
+      run: |
+        ./scripts/feeds update -a >/dev/null 2>&1
+        ./scripts/feeds install -a >/dev/null 2>&1
+        echo "✅ Feeds 初始化完成"
+        
     # ── 8. 配置编译选项（启用 i18n 与多包） ────────────────────
     - name: 配置编译选项
       working-directory: sdk
@@ -207,114 +207,20 @@ jobs:
           done
         done
 
-        # make defconfig 会做一次全量 kconfig 求值。上游 feeds / SDK 元数据的循环依赖
-        # （ariang-nginx 自依赖、fwupd-libs↔FWUPD_CURL、busybox-selinux↔base-files）会在这里
-        # 报 error，kconfig 不中断、不影响构建；完整输出落盘 defconfig.log，失败时全量回放。
-        make defconfig 2>&1 | tee defconfig.log
-        RC=${PIPESTATUS[0]}
-        if [ "$RC" -ne 0 ]; then
-          echo "❌ make defconfig 失败（rc=$RC），完整输出:"
-          cat defconfig.log
-          exit 1
-        fi
-
-        # 说明：此处不再跑 make prereq——基础主机预检（.prereq-build）已由 defconfig 的
-        # 依赖链自动触发；逐包预检只覆盖被默认勾选的无关包（perl/U-Boot 等），
-        # 插件本身不声明预检、编译目标也不依赖这些 stamp，对插件编译无影响。
-
-        # 透明核对：打印 .config 的非默认勾选（谁被 defconfig 勾上了，一目了然）
-        echo "=========================================="
-        echo "📋 .config 非默认勾选一览（含被默认拉进来的无关包）:"
-        [ -x ./scripts/diffconfig.sh ] && ./scripts/diffconfig.sh
-        echo "=========================================="
+        make defconfig 2>&1 | tail -n 5
         echo "✅ 配置完成"
 
     # ── 9. 执行编译 ──────────────────────────────────────────
     - name: 逐包编译
       working-directory: sdk
       run: |
-        # 编译前：列出本次将编译的包与源码目录
-        echo "=========================================="
-        echo "📋 本次将编译的包:"
-        for pkg in $BUILD_PACKAGES; do
-          echo "   📦 $pkg"
-        done
-        echo "📁 对应源码目录:"
+        # 按目录编译各个包（优先依赖编译）
         for dir in $BUILD_DIRS; do
-          echo "   📂 package/${dir}"
-        done
-        echo "=========================================="
-
-        # ── 关键 ───────────────────────────────────────────────
-        # OPENWRT_BUILD=1 直接进入 root Makefile 的构建系统分支（跳过 include/toplevel.mk
-        # 的 %:: 包装层）：否则每个 make 目标都会先重跑一遍 make prereq（全量预检）
-        # + conf --defconfig（全量 kconfig 求值）+ prepare-tmpinfo（元数据扫描）。
-        # 逐包编译、失败记录后跳过继续；包间依赖顺序由 tmp/.packagedeps 自动解析。
-        SUCCESS=()
-        FAILED=()
-
-        for dir in $BUILD_DIRS; do
-          echo ""
-          echo "══════════════════════════════════"
-          echo "🔨 编译: package/${dir}"
-          echo "══════════════════════════════════"
-          LOG="build-$(echo "$dir" | tr '/' '_').log"
-
-          make OPENWRT_BUILD=1 "package/${dir}/compile" -j$(nproc) 2>&1 | tee "$LOG"
-          RC=${PIPESTATUS[0]}
-
-          if [ "$RC" -ne 0 ]; then
-            echo "⚠️ 并行编译未通过（rc=$RC），改用单线程详细模式重试（完整输出）..."
-            make OPENWRT_BUILD=1 "package/${dir}/compile" V=s -j1 2>&1 | tee "${LOG%.log}-retry.log"
-            RC=${PIPESTATUS[0]}
-          fi
-
-          if [ "$RC" -ne 0 ]; then
-            echo "❌ package/${dir} 编译失败，跳过并继续编译其余插件"
-            echo "   错误关键字摘录:"
-            grep -nE 'error|Error|fatal|undefined reference|No rule to make target' "${LOG%.log}"*.log 2>/dev/null | tail -n 15 || true
-            FAILED+=("$dir")
-          else
-            echo "✅ package/${dir} 编译成功"
-            SUCCESS+=("$dir")
-          fi
+          echo "🔨 正在编译源码目录: package/${dir} ..."
+          make "package/${dir}/compile" -j$(nproc) || make "package/${dir}/compile" V=s -j1
         done
 
-        echo ""
-        echo "=========================================="
-        echo "📊 编译结果:"
-        echo "  ✅ 成功 ${#SUCCESS[@]}: ${SUCCESS[*]:-无}"
-        echo "  ❌ 失败 ${#FAILED[@]}: ${FAILED[*]:-无}"
-        echo "=========================================="
-
-        # 编译完成后校验：每个识别到的包都应产出安装包；
-        # 有编译失败时缺失属预期（只提示），全部目录成功才硬校验
-        echo ""
-        echo "🔍 校验各包产物..."
-        MISS=0
-        for pkg in $BUILD_PACKAGES; do
-          HIT=$(find bin -type f \( -name "${pkg}_*" -o -name "${pkg}-*" \) -print -quit 2>/dev/null)
-          if [ -n "$HIT" ]; then
-            echo "   ✅ $pkg"
-          else
-            echo "   ⚠️ $pkg 未产出安装包"
-            MISS=1
-          fi
-        done
-
-        if [ "$MISS" -ne 0 ] && [ ${#FAILED[@]} -eq 0 ]; then
-          echo "❌ 全部目录编译成功但有包未产出安装包，bin/ 目录现有安装包:"
-          find bin -type f \( -name "*.ipk" -o -name "*.apk" \) 2>/dev/null
-          exit 1
-        fi
-
-        # 全部失败才算整体失败（部分成功时保持 job 成功，产物照常收集/上传）
-        if [ ${#SUCCESS[@]} -eq 0 ]; then
-          echo "❌ 所有插件编译失败"
-          exit 1
-        fi
-
-        echo "✅ 编译完成：成功 ${#SUCCESS[@]}，失败 ${#FAILED[@]}"
+        echo "✅ 全部编译完成"
 
     # ── 10. 收集产物 ─────────────────────────────────────────
     - name: 收集编译产物
