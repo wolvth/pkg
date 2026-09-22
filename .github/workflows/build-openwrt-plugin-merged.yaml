@@ -207,7 +207,33 @@ jobs:
           done
         done
 
-        make defconfig 2>&1 | tail -n 5
+        # make defconfig 会做一次全量 kconfig 求值。上游 feeds / SDK 元数据的循环依赖
+        # （ariang-nginx 自依赖、fwupd-libs↔FWUPD_CURL、busybox-selinux↔base-files）会在这里
+        # 报 error，kconfig 不中断、不影响构建；完整输出落盘 defconfig.log，失败时全量回放。
+        make defconfig 2>&1 | tee defconfig.log
+        RC=${PIPESTATUS[0]}
+        if [ "$RC" -ne 0 ]; then
+          echo "❌ make defconfig 失败（rc=$RC），完整输出:"
+          cat defconfig.log
+          exit 1
+        fi
+
+        # 一次性跑完主机工具预检。注意：defconfig 的默认展开会把一些无关包（如 perl、
+        # 各 board 的 U-Boot 设备包）拉进 .config，它们的 prereq 检查也会在这里跑一次
+        # （Checking '...' / time: .../prereq 输出）——只是预检，它们不会被编译。
+        make prereq 2>&1 | tee prereq.log
+        RC=${PIPESTATUS[0]}
+        if [ "$RC" -ne 0 ]; then
+          echo "❌ make prereq 失败（rc=$RC），完整输出:"
+          cat prereq.log
+          exit 1
+        fi
+
+        # 透明核对：打印 .config 的非默认勾选（谁被 defconfig 勾上了，一目了然）
+        echo "=========================================="
+        echo "📋 .config 非默认勾选一览（含被默认拉进来的无关包）:"
+        [ -x ./scripts/diffconfig.sh ] && ./scripts/diffconfig.sh
+        echo "=========================================="
         echo "✅ 配置完成"
 
     # ── 9. 执行编译 ──────────────────────────────────────────
@@ -226,13 +252,56 @@ jobs:
         done
         echo "=========================================="
 
-        # 按目录编译各个包（优先依赖编译）
+        # ── 关键 ───────────────────────────────────────────────
+        # OPENWRT_BUILD=1 直接进入 root Makefile 的构建系统分支（跳过 include/toplevel.mk
+        # 的 %:: 包装层）。否则每个 make 目标都会先重跑一遍 make prereq（全量预检扫描）
+        # + conf --defconfig（全量 kconfig 求值）+ prepare-tmpinfo（全量元数据扫描），
+        # 这就是之前“很多报错 + 重复输出”的根源。
+        # 全部目标一次传入：包间依赖顺序由 tmp/.packagedeps 自动解析。
+        TARGETS=""
         for dir in $BUILD_DIRS; do
-          echo "🔨 正在编译源码目录: package/${dir} ..."
-          make "package/${dir}/compile" -j$(nproc) || make "package/${dir}/compile" V=s -j1
+          TARGETS="$TARGETS package/${dir}/compile"
         done
 
-        echo "✅ 全部编译完成"
+        echo "🔨 make OPENWRT_BUILD=1 ${TARGETS} -j$(nproc)"
+        make OPENWRT_BUILD=1 ${TARGETS} -j$(nproc) 2>&1 | tee build.log
+        RC=${PIPESTATUS[0]}
+
+        if [ "$RC" -ne 0 ]; then
+          echo "⚠️ 并行编译未通过（rc=$RC），改用单线程详细模式重试（完整输出）..."
+          make OPENWRT_BUILD=1 ${TARGETS} V=s -j1 2>&1 | tee build-retry.log
+          RC=${PIPESTATUS[0]}
+        fi
+
+        if [ "$RC" -ne 0 ]; then
+          echo "❌ 编译失败，错误关键字摘录:"
+          grep -nE 'error|Error|fatal|undefined reference|No rule to make target' build*.log | tail -n 40 || true
+          echo "──────── 首次编译日志尾部 ────────"
+          tail -n 200 build.log
+          exit 1
+        fi
+
+        # 编译完成后校验：每个识别到的包都必须产出安装包
+        echo ""
+        echo "🔍 校验各包产物..."
+        MISS=0
+        for pkg in $BUILD_PACKAGES; do
+          HIT=$(find bin -type f \( -name "${pkg}_*" -o -name "${pkg}-*" \) -print -quit 2>/dev/null)
+          if [ -n "$HIT" ]; then
+            echo "   ✅ $pkg"
+          else
+            echo "   ❌ $pkg 未产出安装包"
+            MISS=1
+          fi
+        done
+
+        if [ "$MISS" -ne 0 ]; then
+          echo "❌ 以下包未产出安装包，bin/ 目录现有安装包:"
+          find bin -type f \( -name "*.ipk" -o -name "*.apk" \) 2>/dev/null
+          exit 1
+        fi
+
+        echo "✅ 全部编译完成，产物校验通过"
 
     # ── 10. 收集产物 ─────────────────────────────────────────
     - name: 收集编译产物
