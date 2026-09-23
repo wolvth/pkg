@@ -1,6 +1,6 @@
-# 通用 OpenWrt LuCI 插件全自动高效编译器 (终极版)
+# 通用 OpenWrt LuCI 插件编译器
 # 支持全目录拓扑、同级依赖引用、单Makefile多包识别、容错跳过与可视化报告
-name: ai_studio_code Build OpenWrt Packages
+name: ai_studio_code Build Packages
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         required: true
         default: 'https://github.com/qimaoww/QNatter.git'
       repo_branch:
-        description: '仓库分支'
+        description: '仓库分支,兼容master'
         required: false
         default: 'main'
       plugin_subdir:
@@ -87,7 +87,7 @@ jobs:
         echo "✅ 系统基础依赖安装完成"
 
     - name: 配置 Go 编译环境 (用于编译 Go 二进制内核)
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: 'stable'
 
@@ -145,7 +145,13 @@ jobs:
       run: |
         REPO_DIR="/tmp/plugin-repo"
         rm -rf "$REPO_DIR"
-        git clone --depth 1 --branch "${{ inputs.repo_branch }}" "${{ inputs.repo_url }}" "$REPO_DIR"
+
+        BRANCH="${{ inputs.repo_branch }}"
+        if ! git clone --depth 1 --branch "$BRANCH" "${{ inputs.repo_url }}" "$REPO_DIR" 2>/dev/null; then
+          echo "Branch '$BRANCH' not found, trying master..."
+          git clone --depth 1 --branch master "${{ inputs.repo_url }}" "$REPO_DIR"
+        fi
+    
         echo "✅ 仓库克隆完成，顶级目录结构:"
         find "$REPO_DIR" -maxdepth 2 -not -path '*/.*' | sort
 
@@ -300,7 +306,7 @@ jobs:
           echo "CONFIG_PACKAGE_${PKG}=y" >> .config
         done < /tmp/target_packages.txt
 
-        make defconfig 2>&1 | tail -n 10
+        make defconfig 2>&1 | tail -n 5
         echo "✅ .config 配置文件生成完成"
 
     # ── 11. 执行编译 (按目录编译，避免重复且直达底层) ──────────
