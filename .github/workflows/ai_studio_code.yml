@@ -183,13 +183,13 @@ jobs:
         fi
 
         # 修复 www/ 目录为 OpenWrt 标准 htdocs/
-        find package/custom -type d -name "www" 2>/dev/null | while read -r w; do
-          pdir=$(dirname "$w")
-          mkdir -p "$pdir/htdocs"
-          cp -rT "$w" "$pdir/htdocs"
-          rm -rf "$w"
-          echo "  🔧 已转换: $w -> $pdir/htdocs"
-        done
+        #find package/custom -type d -name "www" 2>/dev/null | while read -r w; do
+        #  pdir=$(dirname "$w")
+        #  mkdir -p "$pdir/htdocs"
+        #  cp -rT "$w" "$pdir/htdocs"
+        #  rm -rf "$w"
+        #  echo "  🔧 已转换: $w -> $pdir/htdocs"
+        #done
 
         # 泛化修复任意层级的 ../luci.mk
         find package/custom -name "Makefile" -exec sed -i -E 's#(\.\./)+luci\.mk#$(TOPDIR)/feeds/luci/luci.mk#g' {} + 2>/dev/null || true
