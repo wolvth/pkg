@@ -48,23 +48,31 @@ jobs:
     - name: 解析与确认参数
       id: params
       run: |
-        VERSION="${{ inputs.openwrt_version }}"
+        # 1. 提取并设置局部变量
         ARCH="${{ inputs.target_arch }}"
         TARGET=$(echo "$ARCH" | awk '{print $1}')
         SUBTARGET=$(echo "$ARCH" | awk '{print $2}')
         REPO_NAME=$(basename -s .git "${{ inputs.repo_url }}")
+        
+        VERSION="${{ inputs.openwrt_version }}"
+        PLUGIN_SUBDIR="${{ inputs.plugin_subdir }}"
+        PACKAGE_NAME="${{ inputs.package_name }}"
+        EXCLUDE_PKG="${{ inputs.exclude_pkg }}"
+        
         TIMEOUT="${{ inputs.timeout_per_pkg }}"
         TIMEOUT="${TIMEOUT:-0}"
 
+        # 2. 写入下一个步骤的环境变量 (GITHUB_ENV)
         echo "VERSION=$VERSION"                     >> $GITHUB_ENV
         echo "TARGET=$TARGET"                       >> $GITHUB_ENV
         echo "SUBTARGET=$SUBTARGET"                 >> $GITHUB_ENV
         echo "REPO_NAME=$REPO_NAME"                 >> $GITHUB_ENV
-        echo "PLUGIN_SUBDIR=${{ inputs.plugin_subdir }}" >> $GITHUB_ENV
-        echo "PACKAGE_NAME=${{ inputs.package_name }}"   >> $GITHUB_ENV
-        echo "EXCLUDE_PKG=${{ inputs.exclude_pkg }}"     >> $GITHUB_ENV
+        echo "PLUGIN_SUBDIR=$PLUGIN_SUBDIR"         >> $GITHUB_ENV
+        echo "PACKAGE_NAME=$PACKAGE_NAME"           >> $GITHUB_ENV
+        echo "EXCLUDE_PKG=$EXCLUDE_PKG"             >> $GITHUB_ENV
         echo "TIMEOUT_MIN=$TIMEOUT"                 >> $GITHUB_ENV
 
+        # 3. 在当前步骤完美打印
         echo "=========================================="
         echo "📋 编译任务参数已就绪:"
         echo "   仓库地址:   ${{ inputs.repo_url }}"
@@ -72,9 +80,9 @@ jobs:
         echo "   扫描子目录: ${PLUGIN_SUBDIR:-<全仓库扫描>}"
         echo "   指定包名:   ${PACKAGE_NAME:-<全自动识别>}"
         echo "   排除列表:   ${EXCLUDE_PKG:-<无>}"
-        echo "   SDK 版本:   ${{ inputs.openwrt_version }}"
+        echo "   SDK 版本:   $VERSION"
         echo "   目标架构:   $TARGET / $SUBTARGET"
-        echo "   单包超时:   ${TIMEOUT} 分钟/包"
+        echo "   单包超时:   ${TIMEOUT} 分钟/目录"
         echo "=========================================="
 
     # ── 2. 安装基础编译依赖与语言环境 ─────────────────────────
