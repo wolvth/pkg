@@ -8,7 +8,7 @@ on:
       repo_url:
         description: '插件源码仓库地址 (HTTPS)'
         required: true
-        default: 'https://github.com/qimaoww/QNatter.git'
+        default: 'https://github.com/wolvth/build.git'
       repo_branch:
         description: '仓库分支,兼容master'
         required: false
@@ -48,6 +48,7 @@ jobs:
     - name: 解析与确认参数
       id: params
       run: |
+        VERSION="${{ inputs.openwrt_version }}"
         ARCH="${{ inputs.target_arch }}"
         TARGET=$(echo "$ARCH" | awk '{print $1}')
         SUBTARGET=$(echo "$ARCH" | awk '{print $2}')
@@ -55,7 +56,7 @@ jobs:
         TIMEOUT="${{ inputs.timeout_per_pkg }}"
         TIMEOUT="${TIMEOUT:-0}"
 
-        echo "VERSION=${{ inputs.openwrt_version }}" >> $GITHUB_ENV
+        echo "VERSION=$VERSION"                     >> $GITHUB_ENV
         echo "TARGET=$TARGET"                       >> $GITHUB_ENV
         echo "SUBTARGET=$SUBTARGET"                 >> $GITHUB_ENV
         echo "REPO_NAME=$REPO_NAME"                 >> $GITHUB_ENV
@@ -90,6 +91,7 @@ jobs:
       uses: actions/setup-go@v6
       with:
         go-version: 'stable'
+        cache: false
 
     # ── 3. SDK 缓存 ───────────────────────────────────────────
     - name: 检查 SDK 缓存
