@@ -163,7 +163,7 @@ jobs:
         fi
     
         echo "✅ 仓库克隆完成，顶级目录结构:"
-        find "$REPO_DIR" -maxdepth 2 -not -path '*/.*' | sort
+        find "$REPO_DIR" -maxdepth 3 -not -path '*/.*' | sort
 
     # ── 8. 智能平铺部署至 SDK (拓扑保护) ───────────────────────
     - name: 部署源码并修复拓扑
@@ -313,10 +313,10 @@ jobs:
         # 激活所有被探测到的有效包
         while read -r PKG; do
           [ -z "$PKG" ] && continue
-          echo "CONFIG_PACKAGE_${PKG}=y" >> .config
+          echo "CONFIG_PACKAGE_${PKG}=m" >> .config
         done < /tmp/target_packages.txt
 
-        make defconfig 2>&1 | tail -n 5
+        make defconfig 2>&1 | tail -n 4
         echo "✅ .config 配置文件生成完成"
 
     # ── 11. 执行编译 (按目录编译，避免重复且直达底层) ──────────
@@ -443,6 +443,7 @@ jobs:
         echo "| **源码仓库** | \`${{ inputs.repo_url }}\` |" >> $GITHUB_STEP_SUMMARY
         echo "| **分支** | \`${{ inputs.repo_branch }}\` |" >> $GITHUB_STEP_SUMMARY
         echo "| **扫描目录** | \`${{ inputs.plugin_subdir || '<全仓库>' }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **排除列表** | \`${{ inputs.exclude_pkg || '<根目录>' }}\` |" >> $GITHUB_STEP_SUMMARY
         echo "| **SDK 版本** | \`${{ env.VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
         echo "| **目标架构** | \`${{ env.TARGET }} / ${{ env.SUBTARGET }}\` |" >> $GITHUB_STEP_SUMMARY
         echo "| **探测包数** | **${{ env.PACKAGE_COUNT || 0 }}** 个 |" >> $GITHUB_STEP_SUMMARY
