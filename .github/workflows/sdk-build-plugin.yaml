@@ -76,7 +76,7 @@ jobs:
       uses: actions/setup-go@v6
       with:
         go-version: 'stable'
-        
+        cache: false
     # ── 3. SDK 缓存 ──────────────────────────────────────────
     - name: 缓存 SDK
       id: cache-sdk
@@ -284,6 +284,19 @@ jobs:
         if-no-files-found: error
         retention-days: 90
 
+    - name: 生成编译报告摘要
+      if: always()
+      run: |
+        echo "## 📊 OpenWrt 插件构建报告" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| 配置项 | 属性值 |" >> $GITHUB_STEP_SUMMARY
+        echo "|:---|:---|" >> $GITHUB_STEP_SUMMARY
+        echo "| **源码仓库** | \`${{ inputs.repo_url }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **分支** | \`${{ inputs.repo_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **扫描目录** | \`${{ inputs.plugin_subdir || '<根目录>' }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **SDK 版本** | \`${{ env.VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **目标架构** | \`${{ env.TARGET }} / ${{ env.SUBTARGET }}\` |" >> $GITHUB_STEP_SUMMARY
+        
     - name: 清理
       if: always()
       run: rm -rf sdk /tmp/plugin-repo artifacts
