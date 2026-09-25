@@ -126,7 +126,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential clang flex bison g++ gawk \
+            build-essential clang flex bison g++ gawk clang llvm\
             gcc-multilib g++-multilib gettext git libelf-dev \
             libncurses5-dev libssl-dev rsync zlib1g-dev ccache \
             unzip zlib1g-dev file wget swig python3-pyelftools python3-setuptools
