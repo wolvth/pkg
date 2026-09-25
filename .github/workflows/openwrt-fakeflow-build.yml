@@ -151,7 +151,12 @@ jobs:
         id: plan
         run: |
           set -euo pipefail
-          n="$(find cached-pkgs -type f -name "*.$PKGEXT" 2>/dev/null | wc -l)"
+          # 注意：缓存未命中时 cached-pkgs 不存在，find 会报错退出；
+          # 赋值语句会继承命令替换的退出码并触发 set -e，必须先判目录
+          n=0
+          if [ -d cached-pkgs ]; then
+            n="$(find cached-pkgs -type f -name "*.$PKGEXT" | wc -l)"
+          fi
           if [ "$n" -eq 2 ]; then
             echo "reuse=true" >> "$GITHUB_OUTPUT"
             echo "BUILD_MODE=reuse" >> "$GITHUB_ENV"
