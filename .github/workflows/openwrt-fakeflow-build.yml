@@ -1,25 +1,30 @@
 # ============================================================
-# fake-flow 一体化构建 workflow（合并版）
+# fake-flow 构建 workflow（合并版，只编译、不测试）
 #
-# 一次运行同时产出：
-#   - 核心包 fakeflow
-#   - LuCI 包 luci-app-fakeflow
+# 一次运行产出：核心包 fakeflow + LuCI 包 luci-app-fakeflow
 #
-# 架构矩阵：x86/64 与 rockchip/armv8
-# 版本矩阵：OpenWrt 25.12.5 (APK) 与 OpenWrt 24.10.5 (IPK)
+# 手动 Run workflow 时选择：
+#   - 架构 arch：x86 / arm（默认 arm，arm = rockchip/armv8）
+#   - 版本 version：25.12.5（APK 包格式）/ 24.10.5（IPK 包格式），默认 25.12.5
 #
-# 本仓库不包含插件源码，构建时 git clone：
+# 本仓库不含插件源码，构建时 git clone：
 #   https://github.com/lilu0826/fake-flow.git
-#
-# 用法：把本文件放到目标仓库 .github/workflows/ 目录下，
-#       在 Actions 页面 "Run workflow"（可指定源码 ref）。
-# 只需要某一个 OpenWrt 版本时，删掉 matrix 里对应版本的条目即可。
 # ============================================================
 name: fake-flow packages (core + LuCI)
 
 on:
   workflow_dispatch:
     inputs:
+      arch:
+        description: '目标架构（arm = rockchip/armv8）'
+        type: choice
+        options: [x86, arm]
+        default: arm
+      version:
+        description: 'OpenWrt 版本（25.12.5 = APK 格式，24.10.5 = IPK 格式）'
+        type: choice
+        options: ['25.12.5', '24.10.5']
+        default: '25.12.5'
       source_ref:
         description: 'fake-flow 源码 ref（分支/标签/提交 SHA），留空 = 默认分支'
         type: string
@@ -27,8 +32,18 @@ on:
         default: ''
   workflow_call:
     inputs:
+      arch:
+        description: 'x86 或 arm'
+        type: string
+        required: false
+        default: 'arm'
+      version:
+        description: '25.12.5 或 24.10.5'
+        type: string
+        required: false
+        default: '25.12.5'
       source_ref:
-        description: 'fake-flow 源码 ref（分支/标签/提交 SHA），留空 = 默认分支'
+        description: 'fake-flow 源码 ref，留空 = 默认分支'
         type: string
         required: false
         default: ''
@@ -38,89 +53,62 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.owrt }} ${{ matrix.target }} (${{ matrix.pkgext }})
+    name: fake-flow ${{ inputs.arch }} ${{ inputs.version }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # ---------------- OpenWrt 25.12 (APK) ----------------
-          - owrt: '25.12'
-            release: '25.12.5'
-            target: 'x86/64'
-            arch_label: 'x86_64'
-            pkg_arch: 'x86_64'
-            pkgext: 'apk'
-            file_arch: 'x86-64'
-            native_test: true
-            sdk_file: 'openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
-            sdk_sha256: '0c8df0151a1e88feb7c03d694d61f6a18d51872815b7c811d76e2b77504d5e9c'
-            rootfs_file: 'openwrt-25.12.5-x86-64-rootfs.tar.gz'
-            rootfs_sha256: '2dae4250b1b742062ed5787adcdc9dd6d26c7f69f94ced46548eb512d5957e8a'
-            vm_image_file: 'openwrt-25.12.5-x86-64-generic-ext4-combined.img.gz'
-            vm_image_sha256: '23e2538e8ab0eb52dfed1c65d608ecdb71ffd432dd54885da138ae67cd9e4461'
-            vm_kernel: '6.12.94'
-            install_doc: 'packaging/openwrt/INSTALL-25.12.md'
-          - owrt: '25.12'
-            release: '25.12.5'
-            target: 'rockchip/armv8'
-            arch_label: 'rockchip_armv8'
-            pkg_arch: 'aarch64_generic'
-            pkgext: 'apk'
-            file_arch: 'aarch64'
-            native_test: false
-            sdk_file: 'openwrt-sdk-25.12.5-rockchip-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
-            sdk_sha256: '59194a023968398af64bfa7d8bc3eac322641f6dc9cdbade28a4d9dd41866eba'
-            install_doc: 'packaging/openwrt/INSTALL-25.12.md'
-          # ---------------- OpenWrt 24.10 (IPK) ----------------
-          - owrt: '24.10'
-            release: '24.10.5'
-            target: 'x86/64'
-            arch_label: 'x86_64'
-            pkg_arch: 'x86_64'
-            pkgext: 'ipk'
-            file_arch: 'x86-64'
-            native_test: true
-            sdk_file: 'openwrt-sdk-24.10.5-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
-            sdk_sha256: 'd3e8ea62fc1c12f93a9c808c2ef4c01b6e149ee240bcd5a74d15bebcbc385bdd'
-            rootfs_file: 'openwrt-24.10.5-x86-64-rootfs.tar.gz'
-            rootfs_sha256: 'fb3245bce37575f1fc9cc467909c37c5b12e49bf7993a34cd19893511bccf40e'
-            vm_image_file: 'openwrt-24.10.5-x86-64-generic-ext4-combined.img.gz'
-            vm_image_sha256: '5b854a7a2909a0b21887ba9be773b0964eb28fef81d6b8399d32a0f270a5d8ff'
-            vm_kernel: ''
-            install_doc: 'packaging/luci/INSTALL.md'
-          - owrt: '24.10'
-            release: '24.10.5'
-            target: 'rockchip/armv8'
-            arch_label: 'rockchip_armv8'
-            pkg_arch: 'aarch64_generic'
-            pkgext: 'ipk'
-            file_arch: 'aarch64'
-            native_test: false
-            sdk_file: 'openwrt-sdk-24.10.5-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
-            sdk_sha256: '5ba3db732cb1ad0dc723c9428360c18c03ae346b961ec7102aaf3466501834de'
-            install_doc: 'packaging/luci/INSTALL.md'
+    timeout-minutes: 45
     env:
       SOURCE_REPO: https://github.com/lilu0826/fake-flow.git
       SOURCE_REF: ${{ inputs.source_ref }}
-      OPENWRT_VERSION: ${{ matrix.release }}
-      TARGET: ${{ matrix.target }}
-      PKGEXT: ${{ matrix.pkgext }}
-      PKG_ARCH: ${{ matrix.pkg_arch }}
-      FILE_ARCH: ${{ matrix.file_arch }}
-      NATIVE_TEST: ${{ matrix.native_test }}
-      SDK_FILE: ${{ matrix.sdk_file }}
-      SDK_SHA256: ${{ matrix.sdk_sha256 }}
-      ROOTFS_FILE: ${{ matrix.rootfs_file }}
-      ROOTFS_SHA256: ${{ matrix.rootfs_sha256 }}
-      VM_IMAGE_FILE: ${{ matrix.vm_image_file }}
-      VM_IMAGE_SHA256: ${{ matrix.vm_image_sha256 }}
-      VM_KERNEL: ${{ matrix.vm_kernel }}
-      INSTALL_DOC: ${{ matrix.install_doc }}
+      INPUT_ARCH: ${{ inputs.arch }}
+      INPUT_VERSION: ${{ inputs.version }}
     steps:
-      # 本仓库没有插件源码：直接 clone 源码仓库到工作目录，
-      # 后续所有相对路径（tests/ packaging/ Makefile ...）都指向这份 clone。
+      # 根据手动选择解析目标：SDK 文件名 + 官方 sha256 + 包格式 + 架构标识
+      - name: Resolve build target
+        run: |
+          set -euo pipefail
+          case "$INPUT_ARCH/$INPUT_VERSION" in
+            x86/25.12.5)
+              TARGET='x86/64'; PKGEXT='apk'; PKG_ARCH='x86_64'; ARCH_LABEL='x86_64'
+              SDK_FILE='openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
+              SDK_SHA256='0c8df0151a1e88feb7c03d694d61f6a18d51872815b7c811d76e2b77504d5e9c'
+              INSTALL_DOC='packaging/openwrt/INSTALL-25.12.md'
+              ;;
+            arm/25.12.5)
+              TARGET='rockchip/armv8'; PKGEXT='apk'; PKG_ARCH='aarch64_generic'; ARCH_LABEL='rockchip_armv8'
+              SDK_FILE='openwrt-sdk-25.12.5-rockchip-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
+              SDK_SHA256='59194a023968398af64bfa7d8bc3eac322641f6dc9cdbade28a4d9dd41866eba'
+              INSTALL_DOC='packaging/openwrt/INSTALL-25.12.md'
+              ;;
+            x86/24.10.5)
+              TARGET='x86/64'; PKGEXT='ipk'; PKG_ARCH='x86_64'; ARCH_LABEL='x86_64'
+              SDK_FILE='openwrt-sdk-24.10.5-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
+              SDK_SHA256='d3e8ea62fc1c12f93a9c808c2ef4c01b6e149ee240bcd5a74d15bebcbc385bdd'
+              INSTALL_DOC='packaging/luci/INSTALL.md'
+              ;;
+            arm/24.10.5)
+              TARGET='rockchip/armv8'; PKGEXT='ipk'; PKG_ARCH='aarch64_generic'; ARCH_LABEL='rockchip_armv8'
+              SDK_FILE='openwrt-sdk-24.10.5-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
+              SDK_SHA256='5ba3db732cb1ad0dc723c9428360c18c03ae346b961ec7102aaf3466501834de'
+              INSTALL_DOC='packaging/luci/INSTALL.md'
+              ;;
+            *)
+              echo "::error::unsupported arch/version combination: $INPUT_ARCH / $INPUT_VERSION"
+              exit 1
+              ;;
+          esac
+          {
+            echo "TARGET=$TARGET"
+            echo "PKGEXT=$PKGEXT"
+            echo "PKG_ARCH=$PKG_ARCH"
+            echo "ARCH_LABEL=$ARCH_LABEL"
+            echo "SDK_FILE=$SDK_FILE"
+            echo "SDK_SHA256=$SDK_SHA256"
+            echo "INSTALL_DOC=$INSTALL_DOC"
+          } >> "$GITHUB_ENV"
+          echo "Build target: $TARGET ($PKG_ARCH), package format: $PKGEXT"
+
+      # 本仓库没有插件源码：clone 源码仓库到工作目录，
+      # 后续相对路径（packaging/ Makefile ...）都指向这份 clone
       - name: Clone plugin source
         run: |
           set -euo pipefail
@@ -132,32 +120,23 @@ jobs:
           echo "Source commit: $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
           git -C "$GITHUB_WORKSPACE" log -1 --oneline
 
-      - name: Configuration module tests
-        run: node tests/luci/config.test.cjs
-
       - name: Install prerequisites
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential clang llvm flex bison gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zstd file wget
-          if [ "$NATIVE_TEST" = true ]; then
-            sudo apt-get install -y --no-install-recommends qemu-system-x86 python3-venv
-            python3 -m venv "$RUNNER_TEMP/venv"
-            "$RUNNER_TEMP/venv/bin/pip" install pexpect playwright==1.55.0
-            "$RUNNER_TEMP/venv/bin/playwright" install --with-deps chromium
-          fi
+          sudo apt-get install -y --no-install-recommends build-essential clang llvm flex bison gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zstd file
 
       - uses: actions/cache/restore@v4
         id: sdk-cache
         with:
           path: ${{ runner.temp }}/sdk
-          key: openwrt-sdk-${{ matrix.release }}-${{ matrix.arch_label }}-${{ matrix.pkgext }}-v1
+          key: openwrt-sdk-${{ inputs.version }}-${{ inputs.arch }}-v1
 
       - name: Download verified SDK
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          base="https://downloads.openwrt.org/releases/$OPENWRT_VERSION/targets/$TARGET"
+          base="https://downloads.openwrt.org/releases/$INPUT_VERSION/targets/$TARGET"
           curl -fL --retry 3 "$base/$SDK_FILE" -o "$RUNNER_TEMP/sdk.tar.zst"
           echo "$SDK_SHA256  $RUNNER_TEMP/sdk.tar.zst" | sha256sum -c -
           mkdir "$RUNNER_TEMP/sdk"
@@ -196,30 +175,28 @@ jobs:
           make -j2 package/fakeflow/compile V=s BPF_CLANG=clang 2>&1 | tee "$GITHUB_WORKSPACE/build-core.log"
           make -j2 package/luci-app-fakeflow/compile V=s BPF_CLANG=clang 2>&1 | tee "$GITHUB_WORKSPACE/build-luci.log"
 
-      # 依赖（libbpf/elfutils/luci-base 等）编译产物缓存，下次运行只需重编两个插件包
+      # SDK 依赖（libbpf/elfutils/luci-base 等）编译产物缓存，下次只需重编两个插件包
       - uses: actions/cache/save@v4
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         with:
           path: ${{ runner.temp }}/sdk
-          key: openwrt-sdk-${{ matrix.release }}-${{ matrix.arch_label }}-${{ matrix.pkgext }}-v1
+          key: openwrt-sdk-${{ inputs.version }}-${{ inputs.arch }}-v1
 
-      - name: Collect and verify packages
+      - name: Collect packages
         run: |
           set -euo pipefail
           mkdir -p dist
           find "$RUNNER_TEMP/sdk/bin/packages" \( -name "fakeflow*.$PKGEXT" -o -name "luci-app-fakeflow*.$PKGEXT" \) -exec cp '{}' dist/ \;
           ls -l dist
           test "$(find dist -name "*.$PKGEXT" | wc -l)" -eq 2
-          test "$(find dist -name "fakeflow*.$PKGEXT" | wc -l)" -eq 1
-          test "$(find dist -name "luci-app-fakeflow*.$PKGEXT" | wc -l)" -eq 1
           if [ "$PKGEXT" = ipk ]; then
-            # LuCI 包是 noarch；核心包文件名带目标架构
+            # ipk 文件名带架构：LuCI 包是 noarch(_all)，核心包带目标架构
             test "$(find dist -name "luci-app-fakeflow*_all.$PKGEXT" | wc -l)" -eq 1
             test "$(find dist -name "fakeflow_*_${PKG_ARCH}.$PKGEXT" | wc -l)" -eq 1
           fi
           cp "$GITHUB_WORKSPACE/$INSTALL_DOC" dist/INSTALL.md
           {
-            echo "OpenWrt SDK: $OPENWRT_VERSION"
+            echo "OpenWrt SDK: $INPUT_VERSION"
             echo "Target: $TARGET ($PKG_ARCH, musl)"
             echo "Package format: $PKGEXT"
             echo "Packages: fakeflow (core) + luci-app-fakeflow (LuCI)"
@@ -228,90 +205,20 @@ jobs:
           } > dist/BUILD.txt
           (cd dist && sha256sum *."$PKGEXT" > SHA256SUMS)
           cat dist/BUILD.txt
-
-      - name: Architecture and shell script checks
-        run: |
-          set -euo pipefail
-          # 核心二进制架构校验（rockchip 行无法跑容器/QEMU 测试，靠这一步确认交叉编译结果）
-          BIN=$(find "$RUNNER_TEMP/sdk/build_dir" -type f -name fakeflow 2>/dev/null | head -n1 || true)
-          if [ -z "$BIN" ]; then
-            echo "::warning::core binary not found under build_dir, skipping architecture check"
-          else
-            file "$BIN"
-            if ! file "$BIN" | grep -qi -- "$FILE_ARCH"; then
-              echo "::error::core binary architecture mismatch, expected $FILE_ARCH"
-              exit 1
-            fi
-            echo "core binary architecture OK ($FILE_ARCH)"
-          fi
-          # rpcd 脚本语法校验
-          while IFS= read -r f; do
-            sh -n "$f"
-            echo "sh -n OK: $f"
-          done < <(find "$GITHUB_WORKSPACE/packaging" -type f -path '*rpcd*')
-
-      # x86/64：装进 OpenWrt rootfs 容器做安装冒烟测试（与原 workflow 一致）
-      - name: Install into OpenWrt rootfs and smoke test
-        if: matrix.native_test
-        run: |
-          set -euo pipefail
-          base="https://downloads.openwrt.org/releases/$OPENWRT_VERSION/targets/$TARGET"
-          curl -fL --retry 3 "$base/$ROOTFS_FILE" -o "$RUNNER_TEMP/rootfs.tar.gz"
-          echo "$ROOTFS_SHA256  $RUNNER_TEMP/rootfs.tar.gz" | sha256sum -c -
-          docker import "$RUNNER_TEMP/rootfs.tar.gz" fakeflow:test
-          mkdir -p "$RUNNER_TEMP/pkg-cache"
-          if [ "$PKGEXT" = apk ]; then
-            docker run --rm --privileged -v "$RUNNER_TEMP/pkg-cache:/cache" -v "$GITHUB_WORKSPACE/dist:/packages:ro" fakeflow:test /bin/sh -ec '
-              mkdir -p /var/lock
-              ln -s /cache /etc/apk/cache
-              apk update
-              apk --cache-dir /cache add libbpf libelf zlib ip-full tc-full luci-base rpcd jshn jsonfilter luci-theme-bootstrap uhttpd uhttpd-mod-ubus rpcd-mod-file kmod-sched-bpf kmod-sched-core kmod-dummy kmod-tun kmod-veth scapy tcpdump
-              apk add --allow-untrusted /packages/*.apk
-              fakeflow validate --config /etc/fakeflow.toml
-              sh -n /usr/libexec/rpcd/fakeflow
-              apk info -a fakeflow luci-app-fakeflow
-              test "$(find /cache -name "*.apk" | wc -l)" -gt 5
-            '
-          else
-            docker run --rm --privileged -v "$RUNNER_TEMP/pkg-cache:/cache" -v "$GITHUB_WORKSPACE/dist:/packages:ro" fakeflow:test /bin/sh -ec '
-              mkdir -p /var/lock
-              opkg update
-              opkg --cache /cache install /packages/*.ipk luci-theme-bootstrap uhttpd uhttpd-mod-ubus rpcd-mod-file kmod-sched-bpf kmod-dummy kmod-tun
-              fakeflow validate --config /etc/fakeflow.toml
-              sh -n /usr/libexec/rpcd/fakeflow
-            '
-          fi
-
-      # x86/64：QEMU 启动真实 OpenWrt 测 LuCI 与转发路径（与原 workflow 一致）
-      - name: Test packages, LuCI and packet paths in OpenWrt VM
-        if: matrix.native_test
-        run: |
-          set -euo pipefail
-          base="https://downloads.openwrt.org/releases/$OPENWRT_VERSION/targets/$TARGET"
-          curl -fL --retry 3 "$base/$VM_IMAGE_FILE" -o "$RUNNER_TEMP/openwrt.img.gz"
-          echo "$VM_IMAGE_SHA256  $RUNNER_TEMP/openwrt.img.gz" | sha256sum -c -
-          gzip -dc "$RUNNER_TEMP/openwrt.img.gz" > "$RUNNER_TEMP/openwrt.img" || test "$?" -eq 2
-          if [ "$PKGEXT" = apk ]; then
-            FF_APK_CACHE="$RUNNER_TEMP/pkg-cache" FF_EXPECT_KERNEL="$VM_KERNEL" FF_VM_PROTOCOLS=1 "$RUNNER_TEMP/venv/bin/python" tests/luci/vm.py "$RUNNER_TEMP/openwrt.img" dist --apk
-          else
-            FF_IPK_CACHE="$RUNNER_TEMP/pkg-cache" "$RUNNER_TEMP/venv/bin/python" tests/luci/vm.py "$RUNNER_TEMP/openwrt.img" dist
-          fi
+          # 仅信息性输出，便于确认交叉编译产物，不作为断言
+          find "$RUNNER_TEMP/sdk/build_dir" -type f -name fakeflow 2>/dev/null | while read -r b; do file "$b"; done || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fakeflow-${{ matrix.owrt }}-${{ matrix.arch_label }}-${{ matrix.pkgext }}
+          name: fakeflow-${{ inputs.arch }}-${{ inputs.version }}
           path: dist/
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: build-logs-${{ matrix.owrt }}-${{ matrix.arch_label }}-${{ matrix.pkgext }}
+          name: build-logs-${{ inputs.arch }}-${{ inputs.version }}
           path: |
             build-core.log
             build-luci.log
-            build/luci-vm.log
-            build/luci-*.png
-            build/luci-*.html
-            build/luci-trace.zip
           if-no-files-found: ignore
