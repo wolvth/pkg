@@ -5,15 +5,16 @@
 #
 # 手动 Run workflow 时选择：
 #   - 架构 arch：x86 / arm（默认 arm，arm = rockchip/armv8）
-#   - 版本 version：25.12.5（APK 包格式）/ 24.10.5（IPK 包格式），默认 25.12.5
+#   - 版本 version：25.12.5（APK 格式）/ 24.10.5（IPK 格式），默认 25.12.5
 #
-# 本仓库不含插件源码，构建时 git clone：
-#   https://github.com/lilu0826/fake-flow.git
+# 源码：运行时 git clone https://github.com/lilu0826/fake-flow.git
 #
-# 提速机制（对齐原仓库 CI 的速度）：
-#   1. SDK 及依赖（libbpf/elfutils/iproute2/luci-base ...）编译产物缓存复用
-#   2. 快路径：打包输入（ebpf/config/packaging/Makefile）与上次一致时，
-#      直接复用缓存里编好的包，跳过全部编译
+# 速度机制（对齐原仓库 luci.yml 的"40 秒出包"）：
+#   1. 包缓存（内容寻址）：源码树哈希 + 版本 + 架构没变
+#      → 直接复用上次编好的包，不下载 SDK、不装依赖、不编译，整次运行 < 1 分钟
+#   2. SDK 缓存：依赖（libbpf/elfutils/iproute2/luci-base ...）编译产物复用，
+#      源码变了也只重编两个插件包（约 2-4 分钟）
+#   3. 全新组合第一次（冷缓存）：约 15-20 分钟
 # ============================================================
 name: fake-flow packages (core + LuCI)
 
@@ -69,6 +70,7 @@ jobs:
     steps:
       # 根据手动选择解析目标：SDK 文件名 + 官方 sha256 + 包格式 + 架构标识
       - name: Resolve build target
+        id: resolve
         run: |
           set -euo pipefail
           case "$INPUT_ARCH/$INPUT_VERSION" in
@@ -105,11 +107,15 @@ jobs:
             echo "TARGET=$TARGET"
             echo "PKGEXT=$PKGEXT"
             echo "PKG_ARCH=$PKG_ARCH"
-            echo "ARCH_LABEL=$ARCH_LABEL"
             echo "SDK_FILE=$SDK_FILE"
             echo "SDK_SHA256=$SDK_SHA256"
             echo "INSTALL_DOC=$INSTALL_DOC"
           } >> "$GITHUB_ENV"
+          {
+            echo "sdk_file=$SDK_FILE"
+            echo "arch_label=$ARCH_LABEL"
+            echo "pkgext=$PKGEXT"
+          } >> "$GITHUB_OUTPUT"
           echo "Build target: $TARGET ($PKG_ARCH), package format: $PKGEXT"
 
       # 本仓库没有插件源码：clone 源码仓库到工作目录，
@@ -125,61 +131,89 @@ jobs:
           echo "Source commit: $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
           git -C "$GITHUB_WORKSPACE" log -1 --oneline
 
+      # 源码树内容哈希：内容不变则编译产物不变，可整体复用
+      - name: Compute source fingerprint
+        id: fingerprint
+        run: |
+          set -euo pipefail
+          HASH="$(git -C "$GITHUB_WORKSPACE" archive HEAD | sha256sum | cut -d' ' -f1)"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Source tree hash: $HASH"
+
+      # 包缓存（内容寻址）：命中 = 上次编好的核心包 + LuCI 包
+      - uses: actions/cache/restore@v4
+        id: pkgs-cache
+        with:
+          path: cached-pkgs
+          key: pkgs-${{ inputs.version }}-${{ inputs.arch }}-${{ steps.resolve.outputs.pkgext }}-${{ steps.fingerprint.outputs.hash }}
+
+      - name: Decide build plan
+        id: plan
+        run: |
+          set -euo pipefail
+          n="$(find cached-pkgs -type f -name "*.$PKGEXT" 2>/dev/null | wc -l)"
+          if [ "$n" -eq 2 ]; then
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "BUILD_MODE=reuse" >> "$GITHUB_ENV"
+            echo "Inputs unchanged: reusing cached packages, skipping SDK download and compile." | tee build.log
+          else
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "BUILD_MODE=rebuild" >> "$GITHUB_ENV"
+            echo "No cached packages for these inputs: building core + LuCI." | tee build.log
+          fi
+
       - name: Install prerequisites
+        if: steps.plan.outputs.reuse == 'false'
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential clang llvm flex bison gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zstd file
 
       # SDK + 依赖编译产物缓存。key 每次运行唯一（GitHub 缓存不可覆盖），
-      # restore-keys 按前缀取最近的一份；只有真正重编过才存新缓存
-      - uses: actions/cache/restore@v5
+      # restore-keys 按前缀取最近一份（含旧版 key，兼容历史缓存）
+      - uses: actions/cache/restore@v4
+        if: steps.plan.outputs.reuse == 'false'
         id: sdk-cache
         with:
           path: ${{ runner.temp }}/sdk
-          key: openwrt-sdk-${{ inputs.version }}-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: sdk-${{ steps.resolve.outputs.sdk_file }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            sdk-${{ steps.resolve.outputs.sdk_file }}-
             openwrt-sdk-${{ inputs.version }}-${{ inputs.arch }}-
+            openwrt-sdk-${{ inputs.version }}-${{ steps.resolve.outputs.arch_label }}-
 
       - name: Download verified SDK
-        run: |
-          set -euo pipefail
-          if [ -f "$RUNNER_TEMP/sdk/.sdk-complete" ]; then
-            echo "SDK restored from cache, skip download."
-            exit 0
-          fi
-          rm -rf "$RUNNER_TEMP/sdk"
-          mkdir -p "$RUNNER_TEMP/sdk"
-          base="https://downloads.openwrt.org/releases/$INPUT_VERSION/targets/$TARGET"
-          curl -fL --retry 3 "$base/$SDK_FILE" -o "$RUNNER_TEMP/sdk.tar.zst"
-          echo "$SDK_SHA256  $RUNNER_TEMP/sdk.tar.zst" | sha256sum -c -
-          tar --zstd -xf "$RUNNER_TEMP/sdk.tar.zst" --strip-components=1 -C "$RUNNER_TEMP/sdk"
-          date -u +%Y-%m-%dT%H:%M:%SZ > "$RUNNER_TEMP/sdk/.sdk-complete"
-
-      # 快路径直接出包；输入有变化才编译：核心包 fakeflow + LuCI 包 luci-app-fakeflow
-      - name: Build core and LuCI packages
-        id: build
-        working-directory: ${{ runner.temp }}/sdk
+        if: steps.plan.outputs.reuse == 'false'
         run: |
           set -euo pipefail
           sdk="$RUNNER_TEMP/sdk"
-          # 快路径：SDK 缓存里已有上次编好的两个包，且打包输入完全一致 → 跳过编译
-          if [ "$(find "$sdk/bin/packages" \( -name "fakeflow*.$PKGEXT" -o -name "luci-app-fakeflow*.$PKGEXT" \) 2>/dev/null | wc -l)" -eq 2 ] &&
-             [ -d "$sdk/package/fakeflow/src" ] && [ -d "$sdk/package/luci-app-fakeflow" ] &&
-             diff -qr "$GITHUB_WORKSPACE/ebpf" "$sdk/package/fakeflow/src/ebpf" >/dev/null &&
-             diff -qr "$GITHUB_WORKSPACE/config" "$sdk/package/fakeflow/src/config" >/dev/null &&
-             diff -qr "$GITHUB_WORKSPACE/packaging/luci" "$sdk/package/luci-app-fakeflow" >/dev/null &&
-             cmp -s "$GITHUB_WORKSPACE/Makefile" "$sdk/package/fakeflow/src/Makefile" &&
-             cmp -s "$GITHUB_WORKSPACE/packaging/openwrt/Makefile" "$sdk/package/fakeflow/Makefile" &&
-             cmp -s "$GITHUB_WORKSPACE/packaging/openwrt/fakeflow.init" "$sdk/package/fakeflow/src/packaging/openwrt/fakeflow.init" &&
-             cmp -s "$GITHUB_WORKSPACE/packaging/openwrt/fakeflow.config" "$sdk/package/fakeflow/src/packaging/openwrt/fakeflow.config"; then
-            echo "Unchanged inputs: reusing previously built packages, skipping compile." | tee "$GITHUB_WORKSPACE/build-core.log"
-            echo "rebuilt=false" >> "$GITHUB_OUTPUT"
-            echo "BUILD_MODE=reuse" >> "$GITHUB_ENV"
+          if [ -f "$sdk/.sdk-complete" ] && [ "$(cat "$sdk/.sdk-complete")" = "$SDK_FILE" ]; then
+            echo "SDK restored from cache, skip download."
             exit 0
           fi
-          echo "rebuilt=true" >> "$GITHUB_OUTPUT"
-          echo "BUILD_MODE=rebuild" >> "$GITHUB_ENV"
+          # 旧版缓存没有标记文件：用 .config 里的目标板卡验证身份后复用
+          board="${TARGET%/*}"; subtarget="${TARGET#*/}"
+          if [ ! -f "$sdk/.sdk-complete" ] && [ -f "$sdk/.config" ] &&
+             grep -q "CONFIG_TARGET_BOARD=\"$board\"" "$sdk/.config" &&
+             grep -q "CONFIG_TARGET_SUBTARGET=\"$subtarget\"" "$sdk/.config"; then
+            echo "Legacy cached SDK verified for $TARGET, reusing."
+            echo "$SDK_FILE" > "$sdk/.sdk-complete"
+            exit 0
+          fi
+          rm -rf "$sdk"
+          mkdir -p "$sdk"
+          base="https://downloads.openwrt.org/releases/$INPUT_VERSION/targets/$TARGET"
+          curl -fL --retry 3 "$base/$SDK_FILE" -o "$RUNNER_TEMP/sdk.tar.zst"
+          echo "$SDK_SHA256  $RUNNER_TEMP/sdk.tar.zst" | sha256sum -c -
+          tar --zstd -xf "$RUNNER_TEMP/sdk.tar.zst" --strip-components=1 -C "$sdk"
+          echo "$SDK_FILE" > "$sdk/.sdk-complete"
+
+      # 一次 make 调用同时编核心包 + LuCI 包（luci 若依赖核心会自动排序）
+      - name: Build core and LuCI packages
+        if: steps.plan.outputs.reuse == 'false'
+        working-directory: ${{ runner.temp }}/sdk
+        run: |
+          set -euo pipefail
           if [ ! -d feeds/base ]; then ./scripts/feeds update -a; fi
           ./scripts/feeds install libbpf elfutils zlib iproute2 luci-base rpcd libubox jsonfilter
           if [ -f package/fakeflow/Makefile ]; then make package/fakeflow/clean; fi
@@ -205,12 +239,21 @@ jobs:
           } > .config
           make defconfig
           if [ "$PKGEXT" = apk ]; then grep -q '^CONFIG_USE_APK=y' .config; fi
-          JOBS="$(nproc)"
-          make -j"$JOBS" package/fakeflow/compile V=s BPF_CLANG=clang 2>&1 | tee "$GITHUB_WORKSPACE/build-core.log"
-          make -j"$JOBS" package/luci-app-fakeflow/compile V=s BPF_CLANG=clang 2>&1 | tee "$GITHUB_WORKSPACE/build-luci.log"
+          make -j"$(nproc)" package/fakeflow/compile package/luci-app-fakeflow/compile V=s BPF_CLANG=clang 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          # 编好的包放入包缓存目录（供复用与收集）
+          mkdir -p "$GITHUB_WORKSPACE/cached-pkgs"
+          find bin/packages \( -name "fakeflow*.$PKGEXT" -o -name "luci-app-fakeflow*.$PKGEXT" \) -exec cp '{}' "$GITHUB_WORKSPACE/cached-pkgs/" \;
+          test "$(find "$GITHUB_WORKSPACE/cached-pkgs" -name "*.$PKGEXT" | wc -l)" -eq 2
 
-      - uses: actions/cache/save@v5
-        if: steps.build.outputs.rebuilt == 'true'
+      # 包缓存（内容寻址，key 不变即结果不变，可安全存一次用多次）
+      - uses: actions/cache/save@v4
+        if: steps.plan.outputs.reuse == 'false'
+        with:
+          path: cached-pkgs
+          key: pkgs-${{ inputs.version }}-${{ inputs.arch }}-${{ steps.resolve.outputs.pkgext }}-${{ steps.fingerprint.outputs.hash }}
+
+      - uses: actions/cache/save@v4
+        if: steps.plan.outputs.reuse == 'false'
         with:
           path: ${{ runner.temp }}/sdk
           key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
@@ -219,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find "$RUNNER_TEMP/sdk/bin/packages" \( -name "fakeflow*.$PKGEXT" -o -name "luci-app-fakeflow*.$PKGEXT" \) -exec cp '{}' dist/ \;
+          find cached-pkgs \( -name "fakeflow*.$PKGEXT" -o -name "luci-app-fakeflow*.$PKGEXT" \) -exec cp '{}' dist/ \;
           ls -l dist
           test "$(find dist -name "*.$PKGEXT" | wc -l)" -eq 2
           if [ "$PKGEXT" = ipk ]; then
@@ -239,20 +282,16 @@ jobs:
           } > dist/BUILD.txt
           (cd dist && sha256sum *."$PKGEXT" > SHA256SUMS)
           cat dist/BUILD.txt
-          # 仅信息性输出，便于确认交叉编译产物，不作为断言
-          find "$RUNNER_TEMP/sdk/build_dir" -type f -name fakeflow 2>/dev/null | while read -r b; do file "$b"; done || true
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         with:
           name: fakeflow-${{ inputs.arch }}-${{ inputs.version }}
           path: dist/
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: build-logs-${{ inputs.arch }}-${{ inputs.version }}
-          path: |
-            build-core.log
-            build-luci.log
+          path: build.log
           if-no-files-found: ignore
