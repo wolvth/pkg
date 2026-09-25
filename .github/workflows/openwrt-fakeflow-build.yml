@@ -9,6 +9,11 @@
 #
 # 本仓库不含插件源码，构建时 git clone：
 #   https://github.com/lilu0826/fake-flow.git
+#
+# 提速机制（对齐原仓库 CI 的速度）：
+#   1. SDK 及依赖（libbpf/elfutils/iproute2/luci-base ...）编译产物缓存复用
+#   2. 快路径：打包输入（ebpf/config/packaging/Makefile）与上次一致时，
+#      直接复用缓存里编好的包，跳过全部编译
 # ============================================================
 name: fake-flow packages (core + LuCI)
 
@@ -126,27 +131,55 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential clang llvm flex bison gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zstd file
 
-      - uses: actions/cache/restore@v4
+      # SDK + 依赖编译产物缓存。key 每次运行唯一（GitHub 缓存不可覆盖），
+      # restore-keys 按前缀取最近的一份；只有真正重编过才存新缓存
+      - uses: actions/cache/restore@v5
         id: sdk-cache
         with:
           path: ${{ runner.temp }}/sdk
-          key: openwrt-sdk-${{ inputs.version }}-${{ inputs.arch }}-v1
+          key: openwrt-sdk-${{ inputs.version }}-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            openwrt-sdk-${{ inputs.version }}-${{ inputs.arch }}-
 
       - name: Download verified SDK
-        if: steps.sdk-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          if [ -f "$RUNNER_TEMP/sdk/.sdk-complete" ]; then
+            echo "SDK restored from cache, skip download."
+            exit 0
+          fi
+          rm -rf "$RUNNER_TEMP/sdk"
+          mkdir -p "$RUNNER_TEMP/sdk"
           base="https://downloads.openwrt.org/releases/$INPUT_VERSION/targets/$TARGET"
           curl -fL --retry 3 "$base/$SDK_FILE" -o "$RUNNER_TEMP/sdk.tar.zst"
           echo "$SDK_SHA256  $RUNNER_TEMP/sdk.tar.zst" | sha256sum -c -
-          mkdir "$RUNNER_TEMP/sdk"
           tar --zstd -xf "$RUNNER_TEMP/sdk.tar.zst" --strip-components=1 -C "$RUNNER_TEMP/sdk"
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$RUNNER_TEMP/sdk/.sdk-complete"
 
-      # 一次性编译出核心包 fakeflow + LuCI 包 luci-app-fakeflow
+      # 快路径直接出包；输入有变化才编译：核心包 fakeflow + LuCI 包 luci-app-fakeflow
       - name: Build core and LuCI packages
+        id: build
         working-directory: ${{ runner.temp }}/sdk
         run: |
           set -euo pipefail
+          sdk="$RUNNER_TEMP/sdk"
+          # 快路径：SDK 缓存里已有上次编好的两个包，且打包输入完全一致 → 跳过编译
+          if [ "$(find "$sdk/bin/packages" \( -name "fakeflow*.$PKGEXT" -o -name "luci-app-fakeflow*.$PKGEXT" \) 2>/dev/null | wc -l)" -eq 2 ] &&
+             [ -d "$sdk/package/fakeflow/src" ] && [ -d "$sdk/package/luci-app-fakeflow" ] &&
+             diff -qr "$GITHUB_WORKSPACE/ebpf" "$sdk/package/fakeflow/src/ebpf" >/dev/null &&
+             diff -qr "$GITHUB_WORKSPACE/config" "$sdk/package/fakeflow/src/config" >/dev/null &&
+             diff -qr "$GITHUB_WORKSPACE/packaging/luci" "$sdk/package/luci-app-fakeflow" >/dev/null &&
+             cmp -s "$GITHUB_WORKSPACE/Makefile" "$sdk/package/fakeflow/src/Makefile" &&
+             cmp -s "$GITHUB_WORKSPACE/packaging/openwrt/Makefile" "$sdk/package/fakeflow/Makefile" &&
+             cmp -s "$GITHUB_WORKSPACE/packaging/openwrt/fakeflow.init" "$sdk/package/fakeflow/src/packaging/openwrt/fakeflow.init" &&
+             cmp -s "$GITHUB_WORKSPACE/packaging/openwrt/fakeflow.config" "$sdk/package/fakeflow/src/packaging/openwrt/fakeflow.config"; then
+            echo "Unchanged inputs: reusing previously built packages, skipping compile." | tee "$GITHUB_WORKSPACE/build-core.log"
+            echo "rebuilt=false" >> "$GITHUB_OUTPUT"
+            echo "BUILD_MODE=reuse" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "rebuilt=true" >> "$GITHUB_OUTPUT"
+          echo "BUILD_MODE=rebuild" >> "$GITHUB_ENV"
           if [ ! -d feeds/base ]; then ./scripts/feeds update -a; fi
           ./scripts/feeds install libbpf elfutils zlib iproute2 luci-base rpcd libubox jsonfilter
           if [ -f package/fakeflow/Makefile ]; then make package/fakeflow/clean; fi
@@ -172,15 +205,15 @@ jobs:
           } > .config
           make defconfig
           if [ "$PKGEXT" = apk ]; then grep -q '^CONFIG_USE_APK=y' .config; fi
-          make -j2 package/fakeflow/compile V=s BPF_CLANG=clang 2>&1 | tee "$GITHUB_WORKSPACE/build-core.log"
-          make -j2 package/luci-app-fakeflow/compile V=s BPF_CLANG=clang 2>&1 | tee "$GITHUB_WORKSPACE/build-luci.log"
+          JOBS="$(nproc)"
+          make -j"$JOBS" package/fakeflow/compile V=s BPF_CLANG=clang 2>&1 | tee "$GITHUB_WORKSPACE/build-core.log"
+          make -j"$JOBS" package/luci-app-fakeflow/compile V=s BPF_CLANG=clang 2>&1 | tee "$GITHUB_WORKSPACE/build-luci.log"
 
-      # SDK 依赖（libbpf/elfutils/luci-base 等）编译产物缓存，下次只需重编两个插件包
-      - uses: actions/cache/save@v4
-        if: steps.sdk-cache.outputs.cache-hit != 'true'
+      - uses: actions/cache/save@v5
+        if: steps.build.outputs.rebuilt == 'true'
         with:
           path: ${{ runner.temp }}/sdk
-          key: openwrt-sdk-${{ inputs.version }}-${{ inputs.arch }}-v1
+          key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
 
       - name: Collect packages
         run: |
@@ -201,6 +234,7 @@ jobs:
             echo "Package format: $PKGEXT"
             echo "Packages: fakeflow (core) + luci-app-fakeflow (LuCI)"
             echo "Source: $SOURCE_REPO @ $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+            echo "Build mode: ${BUILD_MODE:-unknown}"
             echo "Built (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > dist/BUILD.txt
           (cd dist && sha256sum *."$PKGEXT" > SHA256SUMS)
@@ -208,13 +242,13 @@ jobs:
           # 仅信息性输出，便于确认交叉编译产物，不作为断言
           find "$RUNNER_TEMP/sdk/build_dir" -type f -name fakeflow 2>/dev/null | while read -r b; do file "$b"; done || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: fakeflow-${{ inputs.arch }}-${{ inputs.version }}
           path: dist/
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: build-logs-${{ inputs.arch }}-${{ inputs.version }}
